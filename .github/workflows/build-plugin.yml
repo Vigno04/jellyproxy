@@ -1,29 +1,128 @@
-name: Build Plugin
+name: Publish Plugin Manifests
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
     paths:
       - 'plugin/**'
+      - 'build.yaml'
       - '.github/workflows/build-plugin.yml'
-  pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-plugin-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
 
 jobs:
-  build:
-    name: Build .NET Jellyfin Plugin
+  publish-main:
+    if: github.actor != 'github-actions[bot]' && github.ref_name == 'main'
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: |
-            8.0.x
-            9.0.x
+          dotnet-version: 9.0.x
 
-      - name: Build Plugin
-        working-directory: ./plugin/JellyProxy
+      - name: Restore
+        run: dotnet restore plugin/JellyProxy/JellyProxy.csproj
+
+      - name: Build
+        run: dotnet build plugin/JellyProxy/JellyProxy.csproj -c Release --no-restore
+
+      - name: Package stable assets
         run: |
-          dotnet build -c Release
+          BASE_VERSION="$(awk -F '"' '/^version:/ { print $2; exit }' build.yaml)"
+
+          if [[ "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            STABLE_VERSION="${BASE_VERSION}.0"
+          elif [[ "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            STABLE_VERSION="${BASE_VERSION}"
+          else
+            echo "Unsupported version format in build.yaml: ${BASE_VERSION}"
+            exit 1
+          fi
+
+          ZIP_NAME="jellyproxy-${BASE_VERSION}.zip"
+
+          mkdir -p artifacts/package
+          cp plugin/JellyProxy/bin/Release/net9.0/JellyProxy.dll artifacts/package/
+
+          jq --arg version "${STABLE_VERSION}" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.version = $version | .timestamp = $ts' \
+            plugin/JellyProxy/meta.json > artifacts/package/meta.json
+
+          (cd artifacts/package && zip -r "../${ZIP_NAME}" .)
+          cp "artifacts/${ZIP_NAME}" "artifacts/jellyproxy-main-latest.zip"
+
+          CHECKSUM="$(md5sum "artifacts/${ZIP_NAME}" | awk '{print $1}')"
+          TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          NAME="$(jq -r '.name' plugin/JellyProxy/meta.json)"
+          GUID="$(jq -r '.guid' plugin/JellyProxy/meta.json | tr '[:lower:]' '[:upper:]')"
+          OVERVIEW="$(jq -r '.overview' plugin/JellyProxy/meta.json)"
+          DESCRIPTION="$(jq -r '.description' plugin/JellyProxy/meta.json)"
+          OWNER="$(jq -r '.owner' plugin/JellyProxy/meta.json)"
+          CATEGORY="$(jq -r '.category' plugin/JellyProxy/meta.json)"
+          TARGET_ABI="$(jq -r '.targetAbi' plugin/JellyProxy/meta.json)"
+          CHANGELOG="$(awk '/^changelog:/ {getline; sub(/^  /, ""); print; exit}' build.yaml)"
+
+          SOURCE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/refs/heads/main/packages/${ZIP_NAME}"
+
+          jq -n \
+            --arg name "${NAME}" \
+            --arg guid "${GUID}" \
+            --arg overview "${OVERVIEW}" \
+            --arg description "${DESCRIPTION}" \
+            --arg owner "${OWNER}" \
+            --arg category "${CATEGORY}" \
+            --arg targetAbi "${TARGET_ABI}" \
+            --arg version "${STABLE_VERSION}" \
+            --arg timestamp "${TIMESTAMP}" \
+            --arg checksum "${CHECKSUM}" \
+            --arg sourceUrl "${SOURCE_URL}" \
+            --arg changelog "${CHANGELOG}" \
+            '[{
+              name: $name,
+              guid: $guid,
+              overview: $overview,
+              description: $description,
+              owner: $owner,
+              category: $category,
+              versions: [{
+                version: $version,
+                targetAbi: $targetAbi,
+                sourceUrl: $sourceUrl,
+                checksum: $checksum,
+                timestamp: $timestamp,
+                changelog: $changelog
+              }]
+            }]' > manifest.json
+
+          cp manifest.json repository.json
+
+          mkdir -p packages
+          cp "artifacts/${ZIP_NAME}" "packages/${ZIP_NAME}"
+          cp artifacts/jellyproxy-main-latest.zip packages/jellyproxy-main-latest.zip
+
+      - name: Commit published main artifacts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add manifest.json repository.json packages/
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: update plugin manifest and package artifacts [skip ci]"
+            git push origin HEAD:main
+          else
+            echo "Artifacts already up-to-date."
+          fi

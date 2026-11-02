@@ -73,12 +73,15 @@ Verify proxy health:
 curl http://localhost:8080/jellyproxy/api/status
 ```
 
-### 2. Install the Companion Plugin
+### 2. Install the Companion Plugin via Jellyfin Repository Manifest
 
-1. Download `JellyProxy.zip` from [Releases](https://github.com/jellyproxy-project/jellyproxy/releases) or build from `plugin/JellyProxy/`.
-2. Extract into your Jellyfin `plugins/JellyProxy/` folder.
-3. Restart Jellyfin.
-4. Go to **Dashboard -> Plugins -> JellyProxy**, enter your **Proxy Edge URL** and **Shared Secret**, then click **Test Connection & Pair**.
+1. In your Jellyfin Server Dashboard, navigate to **Dashboard -> Plugins -> Repositories**.
+2. Click **+** (Add Repository) and enter:
+   - **Repository Name**: `JellyProxy`
+   - **Repository URL**: `https://raw.githubusercontent.com/jellyproxy-project/jellyproxy/refs/heads/main/manifest.json`
+3. Go to the **Catalog** tab, find **JellyProxy**, and click **Install**.
+4. Restart your Jellyfin Server.
+5. In **Dashboard -> Plugins -> JellyProxy**, enter your **Proxy Edge URL** and **Shared Secret**, then click **Test Connection & Pair**.
 
 ---
 
