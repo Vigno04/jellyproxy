@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "0.1.1.0",
+        "version": "0.2.0.0",
         "targetAbi": "10.11.6.0",
-        "sourceUrl": "https://raw.githubusercontent.com/jellyproxy-project/jellyproxy/refs/heads/main/packages/jellyproxy-0.1.1.zip",
-        "checksum": "fc827d47582464ae7aaa6cc30008e436",
-        "timestamp": "2026-11-02T12:31:14Z",
-        "changelog": "Fix response parsing in testConnection UI handler"
+        "sourceUrl": "https://raw.githubusercontent.com/jellyproxy-project/jellyproxy/refs/heads/main/packages/jellyproxy-0.2.0.zip",
+        "checksum": "6370077e2d5a93ded57e0fd8a01c5b6b",
+        "timestamp": "2026-11-02T13:36:24Z",
+        "changelog": "Phase 2: storage management telemetry, LRU cache quota controls, cache purges, and automated library event invalidation."
       }
     ]
   }
