@@ -117,15 +117,25 @@
                         data: JSON.stringify(payload),
                         contentType: 'application/json'
                     }).then(function (response) {
-                        if (response && response.success) {
-                            statusElem.innerText = '✓ ' + response.message;
+                        if (response && typeof response.json === 'function') {
+                            return response.json();
+                        }
+                        if (typeof response === 'string') {
+                            try { return JSON.parse(response); } catch (e) {}
+                        }
+                        return response;
+                    }).then(function (data) {
+                        const isSuccess = data && (data.success === true || data.Success === true);
+                        const msg = data && (data.message || data.Message);
+                        if (isSuccess) {
+                            statusElem.innerText = '✓ ' + (msg || 'Connected and paired with JellyProxy!');
                             statusElem.style.color = '#4caf50';
                         } else {
-                            statusElem.innerText = '✗ ' + (response.message || 'Connection failed');
+                            statusElem.innerText = '✗ ' + (msg || 'Connection failed');
                             statusElem.style.color = '#f44336';
                         }
                     }).catch(function (err) {
-                        statusElem.innerText = '✗ Network error contacting Jellyfin plugin API';
+                        statusElem.innerText = '✗ Network error: ' + (err.message || err);
                         statusElem.style.color = '#f44336';
                     });
                 }
