@@ -9,6 +9,7 @@ import (
 type Config struct {
 	Port         string
 	UpstreamURL  string
+	UpstreamHost string
 	SharedSecret string
 	CacheDir     string
 	LogLevel     string
@@ -27,6 +28,8 @@ func Load() *Config {
 	}
 	upstream = strings.TrimRight(upstream, "/")
 
+	upstreamHost := os.Getenv("UPSTREAM_HOST")
+
 	cacheDir := os.Getenv("CACHE_DIR")
 	if cacheDir == "" {
 		cacheDir = "/var/cache/jellyproxy"
@@ -40,6 +43,7 @@ func Load() *Config {
 	return &Config{
 		Port:         port,
 		UpstreamURL:  upstream,
+		UpstreamHost: upstreamHost,
 		SharedSecret: os.Getenv("SHARED_SECRET"),
 		CacheDir:     cacheDir,
 		LogLevel:     logLevel,

@@ -5,24 +5,16 @@ services:
       dockerfile: Dockerfile
     container_name: jellyproxy
     restart: unless-stopped
-    ports:
-      - "8096:8096"
+    network_mode: container:gerbil
     environment:
       - PORT=8096
-      - UPSTREAM_URL=https://jellyfin.vigno.eu
+      - UPSTREAM_URL=https://100.89.128.4:52905
+      - UPSTREAM_HOST=jellyfin.vigno.eu
       - SHARED_SECRET=jellyproxy_secret_key_vigno
       - CACHE_DIR=/var/cache/jellyproxy
       - LOG_LEVEL=info
-    networks:
-      - default
-      - pangolin
     volumes:
       - jellyproxy_cache:/var/cache/jellyproxy
-
-networks:
-  default:
-  pangolin:
-    external: true
 
 volumes:
   jellyproxy_cache:
