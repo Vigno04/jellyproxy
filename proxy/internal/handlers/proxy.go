@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/tls"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -25,10 +26,19 @@ func NewReverseProxyHandler(cfg *config.Config) (*ReverseProxyHandler, error) {
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
+	// Support internal / self-signed TLS certificates over VPN / Newt tunnel
+	proxy.Transport = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
-		req.Host = target.Host
+		if cfg.UpstreamHost != "" {
+			req.Host = cfg.UpstreamHost
+		} else {
+			req.Host = target.Host
+		}
 
 		// Set proxy headers
 		if clientIP := req.Header.Get("X-Forwarded-For"); clientIP == "" {

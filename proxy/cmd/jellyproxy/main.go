@@ -20,6 +20,9 @@ func main() {
 	log.Printf("Starting JellyProxy v0.1.0...")
 	log.Printf("Listening on port: :%s", cfg.Port)
 	log.Printf("Target upstream Jellyfin: %s", cfg.UpstreamURL)
+	if cfg.UpstreamHost != "" {
+		log.Printf("Upstream Host header override: %s", cfg.UpstreamHost)
+	}
 	if cfg.SharedSecret != "" {
 		log.Printf("Shared Secret authentication: ENABLED")
 	} else {
