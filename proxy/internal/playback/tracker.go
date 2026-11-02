@@ -15,6 +15,7 @@ import (
 
 	"github.com/Vigno04/jellyproxy/proxy/internal/cache"
 	"github.com/Vigno04/jellyproxy/proxy/internal/config"
+	"github.com/Vigno04/jellyproxy/proxy/internal/auth"
 )
 
 type PlaybackReport struct {
@@ -212,15 +213,10 @@ func (st *SessionTracker) HandleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if st.cfg.SharedSecret != "" {
-		secret := r.Header.Get("X-JellyProxy-Secret")
-		if secret == "" {
-			secret = rep.Secret
-		}
-		if secret != st.cfg.SharedSecret {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+	if st.cfg.SharedSecret != "" && !auth.IsAuthorized(r, st.cfg.SharedSecret) {
+		secret := rep.Secret
+		if secret == "" { secret = r.Header.Get("X-JellyProxy-Secret") }
+		if secret != st.cfg.SharedSecret { http.Error(w, "Unauthorized", http.StatusUnauthorized); return }
 	}
 
 	st.mu.Lock()
@@ -337,7 +333,7 @@ func (st *SessionTracker) runPrefetch(sessionID string, ctx context.Context) {
 		}
 
 		segURL := segments[i]
-		keyHash := cache.HashKey("media:" + segURL)
+		keyHash := cache.HashKey(cache.BuildKey(cache.CategoryMedia, segURL))
 		if st.storage.Has(keyHash) {
 			continue
 		}
@@ -400,6 +396,7 @@ func (st *SessionTracker) runPrefetch(sessionID string, ctx context.Context) {
 }
 
 func (st *SessionTracker) HandleSessions(w http.ResponseWriter, r *http.Request) {
+	if !auth.IsAuthorized(r, st.cfg.SharedSecret) { http.Error(w, "Unauthorized", http.StatusUnauthorized); return }
 	st.mu.RLock()
 	list := make([]*SessionInfo, 0, len(st.sessions))
 	for _, sess := range st.sessions {
