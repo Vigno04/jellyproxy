@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -12,6 +13,7 @@ type Config struct {
 	UpstreamHost string
 	SharedSecret string
 	CacheDir     string
+	MaxStorageGB float64
 	LogLevel     string
 }
 
@@ -35,6 +37,13 @@ func Load() *Config {
 		cacheDir = "/var/cache/jellyproxy"
 	}
 
+	maxStorageGB := 50.0
+	if envMax := os.Getenv("MAX_STORAGE_GB"); envMax != "" {
+		if parsed, err := strconv.ParseFloat(envMax, 64); err == nil && parsed > 0 {
+			maxStorageGB = parsed
+		}
+	}
+
 	logLevel := os.Getenv("LOG_LEVEL")
 	if logLevel == "" {
 		logLevel = "info"
@@ -46,6 +55,7 @@ func Load() *Config {
 		UpstreamHost: upstreamHost,
 		SharedSecret: os.Getenv("SHARED_SECRET"),
 		CacheDir:     cacheDir,
+		MaxStorageGB: maxStorageGB,
 		LogLevel:     logLevel,
 	}
 }

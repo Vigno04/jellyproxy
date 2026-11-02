@@ -149,24 +149,194 @@ public class JellyProxyController : ControllerBase
             has_secret = !string.IsNullOrEmpty(config.SharedSecret),
             auto_sync_playback = config.AutoSyncPlayback,
             enable_shaping = config.EnableBandwidthShaping,
+            max_storage_gb = config.MaxStorageGb,
             last_handshake = config.LastSuccessfulHandshake,
             last_status = config.LastHandshakeStatus
         });
     }
+
+    /// <summary>
+    /// Fetches storage usage statistics from JellyProxy.
+    /// </summary>
+    [HttpGet("Storage")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<object>> GetStorage()
+    {
+        var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        if (string.IsNullOrWhiteSpace(config.ProxyUrl))
+        {
+            return BadRequest(new { success = false, message = "Proxy URL is not configured." });
+        }
+
+        var proxyUrl = config.ProxyUrl.TrimEnd('/');
+        var storageUrl = $"{proxyUrl}/jellyproxy/api/storage";
+
+        try
+        {
+            var client = _httpClientFactory.CreateClient("JellyProxy");
+            client.Timeout = TimeSpan.FromSeconds(10);
+
+            if (!string.IsNullOrWhiteSpace(config.SharedSecret))
+            {
+                client.DefaultRequestHeaders.Remove("X-JellyProxy-Secret");
+                client.DefaultRequestHeaders.Add("X-JellyProxy-Secret", config.SharedSecret);
+            }
+
+            var response = await client.GetAsync(storageUrl).ConfigureAwait(false);
+            var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (response.IsSuccessStatusCode)
+            {
+                return Content(responseBody, MediaTypeNames.Application.Json);
+            }
+
+            return StatusCode((int)response.StatusCode, new { success = false, message = $"Proxy returned HTTP {response.StatusCode}: {responseBody}" });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to fetch storage stats from {Url}", storageUrl);
+            return StatusCode(StatusCodes.Status500InternalServerError, new { success = false, message = $"Failed to fetch storage stats: {ex.Message}" });
+        }
+    }
+
+    /// <summary>
+    /// Purges cache categories on JellyProxy.
+    /// </summary>
+    [HttpPost("Purge")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<object>> PurgeCache([FromBody] PurgeRequest? request)
+    {
+        var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        if (string.IsNullOrWhiteSpace(config.ProxyUrl))
+        {
+            return BadRequest(new { success = false, message = "Proxy URL is not configured." });
+        }
+
+        var proxyUrl = config.ProxyUrl.TrimEnd('/');
+        var purgeUrl = $"{proxyUrl}/jellyproxy/api/cache/purge";
+
+        try
+        {
+            var client = _httpClientFactory.CreateClient("JellyProxy");
+            client.Timeout = TimeSpan.FromSeconds(30);
+
+            var payload = new
+            {
+                category = request?.Category ?? "all"
+            };
+
+            var content = new StringContent(
+                JsonSerializer.Serialize(payload),
+                Encoding.UTF8,
+                MediaTypeNames.Application.Json);
+
+            if (!string.IsNullOrWhiteSpace(config.SharedSecret))
+            {
+                content.Headers.Add("X-JellyProxy-Secret", config.SharedSecret);
+            }
+
+            var response = await client.PostAsync(purgeUrl, content).ConfigureAwait(false);
+            var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (response.IsSuccessStatusCode)
+            {
+                return Content(responseBody, MediaTypeNames.Application.Json);
+            }
+
+            return StatusCode((int)response.StatusCode, new { success = false, message = $"Proxy returned HTTP {response.StatusCode}: {responseBody}" });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to purge cache at {Url}", purgeUrl);
+            return StatusCode(StatusCodes.Status500InternalServerError, new { success = false, message = $"Failed to purge cache: {ex.Message}" });
+        }
+    }
+
+    /// <summary>
+    /// Updates storage configuration on JellyProxy and locally.
+    /// </summary>
+    [HttpPost("UpdateStorageConfig")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<object>> UpdateStorageConfig([FromBody] UpdateStorageConfigRequest? request)
+    {
+        if (request == null)
+        {
+            return BadRequest(new { success = false, message = "Request body is required." });
+        }
+
+        var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        
+        // Update local plugin config
+        config.MaxStorageGb = request.MaxStorageGb;
+        if (Plugin.Instance != null)
+        {
+            Plugin.Instance.SaveConfiguration();
+        }
+
+        if (string.IsNullOrWhiteSpace(config.ProxyUrl))
+        {
+            return Ok(new { success = true, message = "Local configuration updated, but Proxy URL is not configured." });
+        }
+
+        var proxyUrl = config.ProxyUrl.TrimEnd('/');
+        var configUrl = $"{proxyUrl}/jellyproxy/api/config";
+
+        try
+        {
+            var client = _httpClientFactory.CreateClient("JellyProxy");
+            client.Timeout = TimeSpan.FromSeconds(10);
+
+            var payload = new
+            {
+                max_storage_gb = request.MaxStorageGb
+            };
+
+            var content = new StringContent(
+                JsonSerializer.Serialize(payload),
+                Encoding.UTF8,
+                MediaTypeNames.Application.Json);
+
+            if (!string.IsNullOrWhiteSpace(config.SharedSecret))
+            {
+                content.Headers.Add("X-JellyProxy-Secret", config.SharedSecret);
+            }
+
+            var response = await client.PostAsync(configUrl, content).ConfigureAwait(false);
+            var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (response.IsSuccessStatusCode)
+            {
+                return Content(responseBody, MediaTypeNames.Application.Json);
+            }
+
+            return Ok(new { success = true, message = "Local configuration saved, but proxy config update returned HTTP " + response.StatusCode, details = responseBody });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to update storage config on proxy at {Url}", configUrl);
+            return Ok(new { success = true, message = "Local configuration saved, but failed to reach proxy: " + ex.Message });
+        }
+    }
 }
 
 /// <summary>
-/// Request DTO for test connection payload.
+/// Request DTO for cache purge.
 /// </summary>
-public class TestConnectionRequest
+public class PurgeRequest
 {
     /// <summary>
-    /// Target proxy URL.
+    /// Gets or sets the category to purge (all, images, static, media).
     /// </summary>
-    public string? ProxyUrl { get; set; }
+    public string? Category { get; set; }
+}
 
+/// <summary>
+/// Request DTO for updating storage config.
+/// </summary>
+public class UpdateStorageConfigRequest
+{
     /// <summary>
-    /// Shared secret token.
+    /// Gets or sets the maximum storage quota in GB.
     /// </summary>
-    public string? SharedSecret { get; set; }
+    public double MaxStorageGb { get; set; }
 }

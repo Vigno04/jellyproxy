@@ -11,13 +11,13 @@
                     <div class="verticalSection verticalSection-extrabottompadding">
                         <div class="sectionTitleContainer flex align-items-center">
                             <h2 class="sectionTitle">JellyProxy Settings</h2>
-                            <a is="emby-button" class="raised button-alt headerHelpButton" target="_blank" href="https://github.com/jellyproxy-project/jellyproxy">GitHub</a>
+                            <a is="emby-button" class="raised button-alt headerHelpButton" target="_blank" href="[https://github.com/jellyproxy-project/jellyproxy](https://github.com/jellyproxy-project/jellyproxy)">GitHub</a>
                         </div>
                         <p>JellyProxy acts as an edge caching, bandwidth multiplexer, and prefetching orchestrator between your Jellyfin server and remote clients.</p>
 
                         <div class="inputContainer">
                             <label class="inputLabel inputLabelUnfocused" for="txtProxyUrl">Proxy Edge URL:</label>
-                            <input is="emby-input" type="text" id="txtProxyUrl" name="ProxyUrl" required placeholder="http://vps-ip:8080 or https://jellyproxy.domain.tld" />
+                            <input is="emby-input" type="text" id="txtProxyUrl" name="ProxyUrl" required placeholder="http://vps-ip:8080 or [https://jellyproxy.domain.tld](https://jellyproxy.domain.tld)" />
                             <div class="fieldDescription">The public URL of your JellyProxy Docker container deployed on your VPS or cloud host.</div>
                         </div>
 
@@ -50,7 +50,61 @@
                             <span id="testConnectionStatus" style="margin-left: 1em; font-weight: bold;"></span>
                         </div>
 
-                        <div>
+                        <!-- Storage Management Section -->
+                        <div class="verticalSection" style="margin-top: 3em; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 2em;">
+                            <h3 class="sectionTitle">Storage Management & Cache Quota</h3>
+                            <p>Configure cache storage limits and monitor edge cache breakdown across assets and media.</p>
+
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtMaxStorageGb">Maximum Storage Quota (GB):</label>
+                                <input is="emby-input" type="number" step="0.5" min="1" id="txtMaxStorageGb" name="MaxStorageGb" required value="50" />
+                                <div class="fieldDescription">Maximum disk quota allocated for JellyProxy caching before LRU eviction triggers.</div>
+                            </div>
+
+                            <div style="margin: 1em 0 2em 0;">
+                                <button is="emby-button" type="button" class="raised button-alt" id="btnSaveStorageConfig">
+                                    <span>Update Storage Quota</span>
+                                </button>
+                                <span id="storageConfigStatus" style="margin-left: 1em; font-weight: bold;"></span>
+                            </div>
+
+                            <!-- Storage Progress Bar -->
+                            <div style="margin: 1.5em 0;">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5em; font-weight: 500;">
+                                    <span id="lblStorageSummary">Storage Usage: Loading...</span>
+                                    <span id="lblStoragePercent">0%</span>
+                                </div>
+                                <div style="background: rgba(255,255,255,0.1); height: 24px; border-radius: 4px; overflow: hidden; display: flex;">
+                                    <div id="barImages" style="background: #2196f3; width: 0%; transition: width 0.3s;" title="Images"></div>
+                                    <div id="barStatic" style="background: #ff9800; width: 0%; transition: width 0.3s;" title="Static Assets"></div>
+                                    <div id="barMedia" style="background: #4caf50; width: 0%; transition: width 0.3s;" title="Media Segments"></div>
+                                </div>
+                                <div style="display: flex; gap: 1.5em; margin-top: 0.8em; font-size: 0.9em; opacity: 0.8;">
+                                    <span><span style="display:inline-block;width:12px;height:12px;background:#2196f3;border-radius:2px;margin-right:4px;"></span> Images (<span id="statImages">0 MB</span>)</span>
+                                    <span><span style="display:inline-block;width:12px;height:12px;background:#ff9800;border-radius:2px;margin-right:4px;"></span> Static Assets (<span id="statStatic">0 MB</span>)</span>
+                                    <span><span style="display:inline-block;width:12px;height:12px;background:#4caf50;border-radius:2px;margin-right:4px;"></span> Media Segments (<span id="statMedia">0 MB</span>)</span>
+                                    <span><span style="display:inline-block;width:12px;height:12px;background:rgba(255,255,255,0.2);border-radius:2px;margin-right:4px;"></span> Free (<span id="statFree">0 GB</span>)</span>
+                                </div>
+                            </div>
+
+                            <div style="display: flex; gap: 1em; align-items: center; flex-wrap: wrap; margin-top: 1.5em;">
+                                <button is="emby-button" type="button" class="raised button-alt" id="btnRefreshStorage">
+                                    <span>Refresh Storage Stats</span>
+                                </button>
+                                <button is="emby-button" type="button" class="raised button-alt" id="btnPurgeAll" style="background: #f44336; color: #fff;">
+                                    <span>Purge All Cache</span>
+                                </button>
+                                <button is="emby-button" type="button" class="raised button-alt" id="btnPurgeImages">
+                                    <span>Purge Images</span>
+                                </button>
+                                <button is="emby-button" type="button" class="raised button-alt" id="btnPurgeMedia">
+                                    <span>Purge Media</span>
+                                </button>
+                            </div>
+                            <div id="purgeStatus" style="margin-top: 0.8em; font-weight: bold; font-size: 0.9em;"></div>
+                        </div>
+
+                        <div style="margin-top: 3em;">
                             <button is="emby-button" type="submit" class="raised button-submit block">
                                 <span>Save Configuration</span>
                             </button>
@@ -71,6 +125,7 @@
                         document.querySelector('#txtSharedSecret').value = config.SharedSecret || '';
                         document.querySelector('#chkAutoSyncPlayback').checked = config.AutoSyncPlayback !== false;
                         document.querySelector('#chkEnableBandwidthShaping').checked = config.EnableBandwidthShaping !== false;
+                        document.querySelector('#txtMaxStorageGb').value = config.MaxStorageGb !== undefined ? config.MaxStorageGb : 50;
 
                         if (config.LastHandshakeStatus) {
                             const statusElem = document.querySelector('#testConnectionStatus');
@@ -79,6 +134,7 @@
                         }
 
                         Dashboard.hideLoadingMsg();
+                        JellyProxyConfig.loadStorageStats();
                     }).catch(function () {
                         Dashboard.hideLoadingMsg();
                     });
@@ -93,6 +149,7 @@
                         config.SharedSecret = document.querySelector('#txtSharedSecret').value;
                         config.AutoSyncPlayback = document.querySelector('#chkAutoSyncPlayback').checked;
                         config.EnableBandwidthShaping = document.querySelector('#chkEnableBandwidthShaping').checked;
+                        config.MaxStorageGb = parseFloat(document.querySelector('#txtMaxStorageGb').value) || 50.0;
 
                         ApiClient.updatePluginConfiguration(JellyProxyConfig.pluginId, config).then(function (result) {
                             Dashboard.processPluginConfigurationUpdateResult(result);
@@ -138,6 +195,125 @@
                         statusElem.innerText = '✗ Network error: ' + (err.message || err);
                         statusElem.style.color = '#f44336';
                     });
+                },
+
+                loadStorageStats: function () {
+                    ApiClient.ajax({
+                        type: 'GET',
+                        url: ApiClient.getUrl('JellyProxy/Storage')
+                    }).then(function (response) {
+                        if (response && typeof response.json === 'function') {
+                            return response.json();
+                        }
+                        if (typeof response === 'string') {
+                            try { return JSON.parse(response); } catch (e) {}
+                        }
+                        return response;
+                    }).then(function (data) {
+                        if (!data) return;
+                        
+                        const cats = data.categories || data.Categories || {};
+                        const imagesCat = cats.images || cats.Images || {};
+                        const staticCat = cats.static || cats.Static || {};
+                        const mediaCat = cats.media || cats.Media || {};
+
+                        const totalUsedBytes = data.total_bytes ?? data.TotalBytes ?? data.total_used_bytes ?? data.TotalUsedBytes ?? 0;
+                        const maxQuotaBytes = data.max_bytes ?? data.MaxBytes ?? data.max_quota_bytes ?? data.MaxQuotaBytes ?? (parseFloat(document.querySelector('#txtMaxStorageGb').value) * 1024 * 1024 * 1024);
+                        const imagesBytes = imagesCat.used_bytes ?? imagesCat.UsedBytes ?? data.images_bytes ?? data.ImagesBytes ?? 0;
+                        const staticBytes = staticCat.used_bytes ?? staticCat.UsedBytes ?? data.static_bytes ?? data.StaticBytes ?? 0;
+                        const mediaBytes = mediaCat.used_bytes ?? mediaCat.UsedBytes ?? data.media_bytes ?? data.MediaBytes ?? 0;
+
+                        const totalUsedMb = (totalUsedBytes / (1024 * 1024)).toFixed(1);
+                        const maxQuotaGb = (maxQuotaBytes / (1024 * 1024 * 1024)).toFixed(1);
+                        const percentUsed = maxQuotaBytes > 0 ? Math.min(100, (totalUsedBytes / maxQuotaBytes) * 100).toFixed(1) : 0;
+
+                        document.querySelector('#lblStorageSummary').innerText = `Storage Usage: ${totalUsedMb} MB / ${maxQuotaGb} GB`;
+                        document.querySelector('#lblStoragePercent').innerText = `${percentUsed}%`;
+
+                        const imgPct = maxQuotaBytes > 0 ? (imagesBytes / maxQuotaBytes) * 100 : 0;
+                        const staticPct = maxQuotaBytes > 0 ? (staticBytes / maxQuotaBytes) * 100 : 0;
+                        const mediaPct = maxQuotaBytes > 0 ? (mediaBytes / maxQuotaBytes) * 100 : 0;
+
+                        document.querySelector('#barImages').style.width = imgPct + '%';
+                        document.querySelector('#barStatic').style.width = staticPct + '%';
+                        document.querySelector('#barMedia').style.width = mediaPct + '%';
+
+                        document.querySelector('#statImages').innerText = (imagesBytes / (1024 * 1024)).toFixed(1) + ' MB';
+                        document.querySelector('#statStatic').innerText = (staticBytes / (1024 * 1024)).toFixed(1) + ' MB';
+                        document.querySelector('#statMedia').innerText = (mediaBytes / (1024 * 1024)).toFixed(1) + ' MB';
+                        
+                        const freeBytes = Math.max(0, maxQuotaBytes - totalUsedBytes);
+                        document.querySelector('#statFree').innerText = (freeBytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+                    }).catch(function (err) {
+                        console.warn('Failed to load storage stats:', err);
+                        document.querySelector('#lblStorageSummary').innerText = 'Storage Usage: Offline or unconfigured';
+                    });
+                },
+
+                updateStorageConfig: function () {
+                    const statusElem = document.querySelector('#storageConfigStatus');
+                    statusElem.innerText = 'Updating quota...';
+                    statusElem.style.color = '#2196f3';
+
+                    const payload = {
+                        MaxStorageGb: parseFloat(document.querySelector('#txtMaxStorageGb').value) || 50.0
+                    };
+
+                    ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('JellyProxy/UpdateStorageConfig'),
+                        data: JSON.stringify(payload),
+                        contentType: 'application/json'
+                    }).then(function (response) {
+                        if (response && typeof response.json === 'function') {
+                            return response.json();
+                        }
+                        if (typeof response === 'string') {
+                            try { return JSON.parse(response); } catch (e) {}
+                        }
+                        return response;
+                    }).then(function (data) {
+                        statusElem.innerText = '✓ Storage quota updated!';
+                        statusElem.style.color = '#4caf50';
+                        JellyProxyConfig.loadStorageStats();
+                        setTimeout(() => { statusElem.innerText = ''; }, 3000);
+                    }).catch(function (err) {
+                        statusElem.innerText = '✗ Failed: ' + (err.message || err);
+                        statusElem.style.color = '#f44336';
+                    });
+                },
+
+                purgeCache: function (category) {
+                    const statusElem = document.querySelector('#purgeStatus');
+                    statusElem.innerText = `Purging cache (${category})...`;
+                    statusElem.style.color = '#2196f3';
+
+                    const payload = {
+                        Category: category
+                    };
+
+                    ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('JellyProxy/Purge'),
+                        data: JSON.stringify(payload),
+                        contentType: 'application/json'
+                    }).then(function (response) {
+                        if (response && typeof response.json === 'function') {
+                            return response.json();
+                        }
+                        if (typeof response === 'string') {
+                            try { return JSON.parse(response); } catch (e) {}
+                        }
+                        return response;
+                    }).then(function (data) {
+                        statusElem.innerText = `✓ Purge successful (${category})!`;
+                        statusElem.style.color = '#4caf50';
+                        JellyProxyConfig.loadStorageStats();
+                        setTimeout(() => { statusElem.innerText = ''; }, 4000);
+                    }).catch(function (err) {
+                        statusElem.innerText = '✗ Purge failed: ' + (err.message || err);
+                        statusElem.style.color = '#f44336';
+                    });
                 }
             };
 
@@ -147,6 +323,11 @@
 
             document.querySelector('#jellyProxyConfigForm').addEventListener('submit', JellyProxyConfig.saveConfiguration);
             document.querySelector('#btnTestProxyConnection').addEventListener('click', JellyProxyConfig.testConnection);
+            document.querySelector('#btnRefreshStorage').addEventListener('click', JellyProxyConfig.loadStorageStats);
+            document.querySelector('#btnSaveStorageConfig').addEventListener('click', JellyProxyConfig.updateStorageConfig);
+            document.querySelector('#btnPurgeAll').addEventListener('click', function() { JellyProxyConfig.purgeCache('all'); });
+            document.querySelector('#btnPurgeImages').addEventListener('click', function() { JellyProxyConfig.purgeCache('images'); });
+            document.querySelector('#btnPurgeMedia').addEventListener('click', function() { JellyProxyConfig.purgeCache('media'); });
         </script>
     </div>
 </body>
