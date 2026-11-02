@@ -1,7 +1,7 @@
 ---
 name: "JellyProxy"
 guid: "E439D5E7-789A-4E2A-A9E3-2E45DAEC9312"
-version: "0.2.1"
+version: "0.2.2"
 targetAbi: "10.11.6.0"
 framework: "net9.0"
 owner: "Vigno04"

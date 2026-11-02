@@ -31,10 +31,10 @@
             transition: width .3s ease;
         }
 
-        .storageImages { background: #2196f3; }
-        .storageStatic { background: #ff9800; }
-        .storageMedia { background: #4caf50; }
-        .storageFree { background: rgba(255,255,255,.2); }
+        .jpStorageImages { background: #2196f3; }
+        .jpStorageStatic { background: #ff9800; }
+        .jpStorageMedia { background: #4caf50; }
+        .jpStorageFree { background: rgba(255,255,255,.2); }
 
         .storageLegend {
             display: grid;
@@ -166,15 +166,16 @@
                                     <span id="lblStoragePercent">0%</span>
                                 </div>
                                 <div class="storageProgress" role="progressbar" aria-label="Storage usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-                                    <div id="barImages" class="storageSegment storageImages" title="Images"></div>
-                                    <div id="barStatic" class="storageSegment storageStatic" title="Static Assets"></div>
-                                    <div id="barMedia" class="storageSegment storageMedia" title="Media Segments"></div>
+                                    <div id="barImages" class="storageSegment jpStorageImages" title="Images"></div>
+                                    <div id="barStatic" class="storageSegment jpStorageStatic" title="Static Assets"></div>
+                                    <div id="barMedia" class="storageSegment jpStorageMedia" title="Media Segments"></div>
+                                    <div id="barFree" class="storageSegment jpStorageFree" title="Free"></div>
                                 </div>
                                 <div class="storageLegend">
-                                    <span><i class="legendSwatch storageImages"></i>Images (<span id="statImages">0 MB</span>)</span>
-                                    <span><i class="legendSwatch storageStatic"></i>Static Assets (<span id="statStatic">0 MB</span>)</span>
-                                    <span><i class="legendSwatch storageMedia"></i>Media Segments (<span id="statMedia">0 MB</span>)</span>
-                                    <span><i class="legendSwatch storageFree"></i>Free (<span id="statFree">0 GB</span>)</span>
+                                    <span><i class="legendSwatch jpStorageImages"></i>Images (<span id="statImages">0 MB</span>)</span>
+                                    <span><i class="legendSwatch jpStorageStatic"></i>Static Assets (<span id="statStatic">0 MB</span>)</span>
+                                    <span><i class="legendSwatch jpStorageMedia"></i>Media Segments (<span id="statMedia">0 MB</span>)</span>
+                                    <span><i class="legendSwatch jpStorageFree"></i>Free (<span id="statFree">0 GB</span>)</span>
                                 </div>
                             </div>
 
@@ -316,10 +317,10 @@
 
                         const totalUsedMb = (totalUsedBytes / (1024 * 1024)).toFixed(1);
                         const maxQuotaGb = (maxQuotaBytes / (1024 * 1024 * 1024)).toFixed(1);
-                        const percentUsed = maxQuotaBytes > 0 ? Math.min(100, (totalUsedBytes / maxQuotaBytes) * 100).toFixed(1) : 0;
+                        const percentUsed = maxQuotaBytes > 0 ? Math.min(100, (totalUsedBytes / maxQuotaBytes) * 100).toFixed(1) : '0.0';
 
-                        document.querySelector('#lblStorageSummary').innerText = `Storage Usage: ${totalUsedMb} MB / ${maxQuotaGb} GB`;
-                        document.querySelector('#lblStoragePercent').innerText = `${percentUsed}%`;
+                        document.querySelector('#lblStorageSummary').innerText = 'Storage Usage: ' + totalUsedMb + ' MB / ' + maxQuotaGb + ' GB';
+                        document.querySelector('#lblStoragePercent').innerText = percentUsed + '%';
 
                         const imgPct = maxQuotaBytes > 0 ? (imagesBytes / maxQuotaBytes) * 100 : 0;
                         const staticPct = maxQuotaBytes > 0 ? (staticBytes / maxQuotaBytes) * 100 : 0;
@@ -328,9 +329,11 @@
                         const usagePercent = Number(percentUsed) || 0;
                         if (usageBar) usageBar.setAttribute('aria-valuenow', usagePercent.toString());
 
+                        const freePct = maxQuotaBytes > 0 ? Math.max(0, 100 - imgPct - staticPct - mediaPct) : 100;
                         document.querySelector('#barImages').style.width = imgPct + '%';
                         document.querySelector('#barStatic').style.width = staticPct + '%';
                         document.querySelector('#barMedia').style.width = mediaPct + '%';
+                        document.querySelector('#barFree').style.width = freePct + '%';
 
                         document.querySelector('#statImages').innerText = (imagesBytes / (1024 * 1024)).toFixed(1) + ' MB';
                         document.querySelector('#statStatic').innerText = (staticBytes / (1024 * 1024)).toFixed(1) + ' MB';
