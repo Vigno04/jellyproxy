@@ -38,4 +38,9 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets status text returned by the last handshake probe.
     /// </summary>
     public string LastHandshakeStatus { get; set; } = "Not connected";
+
+    /// <summary>
+    /// Gets or sets the maximum storage quota allocated for cache in GB.
+    /// </summary>
+    public double MaxStorageGb { get; set; } = 50.0;
 }

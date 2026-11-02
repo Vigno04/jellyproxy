@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Vigno04/jellyproxy/proxy/internal/cache"
 	"github.com/Vigno04/jellyproxy/proxy/internal/config"
 	"github.com/Vigno04/jellyproxy/proxy/internal/handlers"
 )
@@ -28,13 +29,20 @@ func main() {
 	} else {
 		log.Printf("Shared Secret authentication: DISABLED (open pairing mode)")
 	}
+	log.Printf("Cache directory: %s (Max storage: %.2f GB)", cfg.CacheDir, cfg.MaxStorageGB)
 
-	proxyHandler, err := handlers.NewReverseProxyHandler(cfg)
+	storageMgr, err := cache.NewStorageManager(cfg.CacheDir, cfg.MaxStorageGB)
+	if err != nil {
+		log.Fatalf("Failed to initialize cache storage manager: %v", err)
+	}
+
+	proxyHandler, err := handlers.NewReverseProxyHandler(cfg, storageMgr)
 	if err != nil {
 		log.Fatalf("Failed to initialize reverse proxy: %v", err)
 	}
 
 	handshakeMgr := handlers.NewHandshakeManager(cfg)
+	cacheAPI := handlers.NewCacheAPIHandler(cfg, storageMgr)
 
 	// Custom router multiplexer
 	mux := http.NewServeMux()
@@ -42,8 +50,12 @@ func main() {
 	// Inter-service JellyProxy API endpoints
 	mux.HandleFunc("/jellyproxy/api/status", handshakeMgr.HandleStatus)
 	mux.HandleFunc("/jellyproxy/api/handshake", handshakeMgr.HandleHandshake)
+	mux.HandleFunc("/jellyproxy/api/storage", cacheAPI.HandleStorage)
+	mux.HandleFunc("/jellyproxy/api/config", cacheAPI.HandleConfig)
+	mux.HandleFunc("/jellyproxy/api/cache/purge", cacheAPI.HandlePurge)
+	mux.HandleFunc("/jellyproxy/api/cache/invalidate", cacheAPI.HandleInvalidate)
 
-	// Catch-all: forward all standard Jellyfin traffic to upstream
+	// Catch-all: forward all standard Jellyfin traffic to upstream (with caching)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Keep internal API isolated
 		if strings.HasPrefix(r.URL.Path, "/jellyproxy/api/") {

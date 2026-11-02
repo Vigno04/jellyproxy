@@ -1,14 +1,14 @@
 {
   "category": "General",
-  "changelog": "- Initial release: proxy-plugin handshake and transparent passthrough",
+  "changelog": "- Phase 2: storage management telemetry, LRU cache quota controls, cache purges, and automated library event invalidation",
   "description": "JellyProxy companion plugin for smart edge caching, bandwidth multiplexing, and prefetching.",
   "guid": "E439D5E7-789A-4E2A-A9E3-2E45DAEC9312",
   "name": "JellyProxy",
   "overview": "Smart edge reverse proxy companion plugin for Jellyfin.",
   "owner": "Vigno04",
   "targetAbi": "10.11.6.0",
-  "timestamp": "2026-11-02T12:00:00Z",
-  "version": "0.1.1.0",
+  "timestamp": "2026-11-02T13:30:00Z",
+  "version": "0.2.0.0",
   "status": "Active",
   "autoUpdate": false,
   "assemblies": [
