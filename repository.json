@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "0.3.0.0",
+        "version": "0.4.0.0",
         "targetAbi": "10.11.6.0",
-        "sourceUrl": "https://raw.githubusercontent.com/Vigno04/jellyproxy/refs/heads/main/packages/jellyproxy-0.3.0.zip",
-        "checksum": "7c576e75e55878fc74566f892ca92601",
-        "timestamp": "2026-11-02T18:24:33Z",
-        "changelog": "Phase 3: Real-time playback session tracking, pause & prefetch engine, and playlist sniffing."
+        "sourceUrl": "https://raw.githubusercontent.com/Vigno04/jellyproxy/refs/heads/main/packages/jellyproxy-0.4.0.zip",
+        "checksum": "bbef86be4fe78fad942994c80bf4d763",
+        "timestamp": "2026-11-02T23:26:20Z",
+        "changelog": "Phase 4: SyncPlay single-pull request coalescing, Movie Night pre-seeding pipeline, and hardened API authentication."
       }
     ]
   }
