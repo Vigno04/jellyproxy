@@ -1,0 +1,27 @@
+# Binaries
+bin/
+obj/
+*.dll
+*.exe
+*.so
+*.dylib
+jellyproxy
+
+# Go
+proxy/jellyproxy
+vendor/
+
+# .NET
+plugin/JellyProxy/bin/
+plugin/JellyProxy/obj/
+*.user
+*.suo
+.vs/
+
+# Docker & local data
+data/
+cache/
+
+# OS
+.DS_Store
+Thumbs.db
