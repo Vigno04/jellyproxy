@@ -6,15 +6,23 @@ services:
     container_name: jellyproxy
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "8096:8096"
     environment:
-      - PORT=8080
-      - UPSTREAM_URL=http://homeserver.local:8096 # URL of your Jellyfin master server
-      - SHARED_SECRET=your_super_secret_token_here
+      - PORT=8096
+      - UPSTREAM_URL=https://jellyfin.example.com
+      - SHARED_SECRET=replace-me-shared-secret
       - CACHE_DIR=/var/cache/jellyproxy
       - LOG_LEVEL=info
+    networks:
+      - default
+      - pangolin
     volumes:
       - jellyproxy_cache:/var/cache/jellyproxy
+
+networks:
+  default:
+  pangolin:
+    external: true
 
 volumes:
   jellyproxy_cache:
