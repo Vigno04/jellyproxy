@@ -11,8 +11,8 @@
         "version": "0.2.2.0",
         "targetAbi": "10.11.6.0",
         "sourceUrl": "https://raw.githubusercontent.com/Vigno04/jellyproxy/refs/heads/main/packages/jellyproxy-0.2.2.zip",
-        "checksum": "f024e23af897a7928ae9fc2f1a8d71e7",
-        "timestamp": "2026-11-02T15:42:31Z",
+        "checksum": "09dcdde460c168ae1fdc86ecf5e61f8c",
+        "timestamp": "2026-11-02T16:34:06Z",
         "changelog": "Phase 2: storage management telemetry, LRU cache quota controls, cache purges, and automated library event invalidation."
       }
     ]
