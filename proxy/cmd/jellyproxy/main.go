@@ -12,8 +12,10 @@ import (
 
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/cache"
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/config"
+	"github.com/jellyproxy-project/jellyproxy/proxy/internal/auth"
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/handlers"
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/playback"
+	"github.com/jellyproxy-project/jellyproxy/proxy/internal/preseed"
 )
 
 func main() {
@@ -47,6 +49,7 @@ func main() {
 
 	handshakeMgr := handlers.NewHandshakeManager(cfg)
 	cacheAPI := handlers.NewCacheAPIHandler(cfg, storageMgr)
+	preseedAPI := handlers.NewPreseedAPI(cfg, preseed.NewManager(storageMgr, cfg.UpstreamURL, cfg.UpstreamHost, proxyHandler.ActiveLiveUpstreamCount()))
 
 	// Custom router multiplexer
 	mux := http.NewServeMux()
@@ -54,12 +57,15 @@ func main() {
 	// Inter-service JellyProxy API endpoints
 	mux.HandleFunc("/jellyproxy/api/status", handshakeMgr.HandleStatus)
 	mux.HandleFunc("/jellyproxy/api/handshake", handshakeMgr.HandleHandshake)
-	mux.HandleFunc("/jellyproxy/api/playback/report", playbackTracker.HandleReport)
-	mux.HandleFunc("/jellyproxy/api/playback/sessions", playbackTracker.HandleSessions)
-	mux.HandleFunc("/jellyproxy/api/storage", cacheAPI.HandleStorage)
-	mux.HandleFunc("/jellyproxy/api/config", cacheAPI.HandleConfig)
-	mux.HandleFunc("/jellyproxy/api/cache/purge", cacheAPI.HandlePurge)
-	mux.HandleFunc("/jellyproxy/api/cache/invalidate", cacheAPI.HandleInvalidate)
+	mux.HandleFunc("/jellyproxy/api/playback/report", auth.RequireSecret(cfg.SharedSecret, playbackTracker.HandleReport))
+	mux.HandleFunc("/jellyproxy/api/playback/sessions", auth.RequireSecret(cfg.SharedSecret, playbackTracker.HandleSessions))
+	mux.HandleFunc("/jellyproxy/api/storage", auth.RequireSecret(cfg.SharedSecret, cacheAPI.HandleStorage))
+	mux.HandleFunc("/jellyproxy/api/config", auth.RequireSecret(cfg.SharedSecret, cacheAPI.HandleConfig))
+	mux.HandleFunc("/jellyproxy/api/cache/purge", auth.RequireSecret(cfg.SharedSecret, cacheAPI.HandlePurge))
+	mux.HandleFunc("/jellyproxy/api/cache/invalidate", auth.RequireSecret(cfg.SharedSecret, cacheAPI.HandleInvalidate))
+	mux.HandleFunc("/jellyproxy/api/preseed/start", preseedAPI.Handler(preseedAPI.Start))
+	mux.HandleFunc("/jellyproxy/api/preseed/jobs", preseedAPI.Handler(preseedAPI.Jobs))
+	mux.HandleFunc("/jellyproxy/api/preseed/cancel", preseedAPI.Handler(preseedAPI.Cancel))
 
 	// Catch-all: forward all standard Jellyfin traffic to upstream (with caching)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

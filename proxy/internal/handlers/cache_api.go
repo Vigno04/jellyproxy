@@ -7,6 +7,7 @@ import (
 
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/cache"
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/config"
+	"github.com/jellyproxy-project/jellyproxy/proxy/internal/auth"
 )
 
 // CacheAPIHandler exposes storage telemetry, runtime limit configuration, purge, and invalidation endpoints
@@ -44,6 +45,7 @@ type InvalidateRequest struct {
 
 // authorize checks the shared secret against X-JellyProxy-Secret header, Authorization Bearer token, query param, or JSON body secret
 func (h *CacheAPIHandler) authorize(w http.ResponseWriter, r *http.Request, bodySecret string) bool {
+	if bodySecret != "" && auth.IsAuthorized(r, h.cfg.SharedSecret) { return true }
 	if h.cfg.SharedSecret == "" {
 		return true
 	}

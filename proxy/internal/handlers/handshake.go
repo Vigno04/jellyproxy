@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/config"
+	"github.com/jellyproxy-project/jellyproxy/proxy/internal/auth"
 )
 
 // HandshakeManager tracks paired Jellyfin server state
@@ -56,16 +57,11 @@ func (h *HandshakeManager) HandleStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	authenticated := auth.IsAuthorized(r, h.cfg.SharedSecret)
 	h.mu.RLock()
-	resp := StatusResponse{
-		Status:        "ok",
-		Version:       "0.1.0",
-		UpstreamURL:   h.cfg.UpstreamURL,
-		Paired:        h.paired,
-		LastSeen:      h.lastSeen,
-		ServerName:    h.serverName,
-		ServerID:      h.serverID,
-		SecretSecured: h.cfg.SharedSecret != "",
+	resp := StatusResponse{Status: "ok", Version: "0.1.0", Paired: h.paired, SecretSecured: h.cfg.SharedSecret != ""}
+	if authenticated {
+		resp.UpstreamURL, resp.LastSeen, resp.ServerName, resp.ServerID = h.cfg.UpstreamURL, h.lastSeen, h.serverName, h.serverID
 	}
 	h.mu.RUnlock()
 

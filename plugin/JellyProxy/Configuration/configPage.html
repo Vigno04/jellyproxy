@@ -141,6 +141,15 @@
                             <span id="testConnectionStatus" style="margin-left: 1em; font-weight: bold;"></span>
                         </div>
 
+                        <div class="verticalSection" style="margin-top: 3em; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 2em;">
+                            <h3 class="sectionTitle">Movie Night Pre-seeding</h3>
+                            <p>Download an HLS playlist and its segments into the proxy cache before playback.</p>
+                            <div class="inputContainer"><label class="inputLabel inputLabelUnfocused" for="txtPreseedItem">Item ID or stream path:</label><input is="emby-input" id="txtPreseedItem" placeholder="Item ID or /Videos/.../main.m3u8" /></div>
+                            <button is="emby-button" type="button" class="raised button-alt" id="btnStartPreseed">Start Pre-seeding</button>
+                            <span id="preseedStatus" style="margin-left:1em"></span>
+                            <div id="preseedJobs" style="margin-top:1em"></div>
+                        </div>
+
                         <!-- Storage Management Section -->
                         <div class="verticalSection" style="margin-top: 3em; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 2em;">
                             <h3 class="sectionTitle">Storage Management & Cache Quota</h3>
@@ -411,12 +420,30 @@
                         statusElem.innerText = '✗ Purge failed: ' + (err.message || err);
                         statusElem.style.color = '#f44336';
                     });
+                },
+
+                loadPreseedJobs: function () {
+                    ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Preseed/Jobs') }).then(function (data) {
+                        const jobs = typeof data === 'string' ? JSON.parse(data) : data;
+                        document.querySelector('#preseedJobs').innerHTML = (jobs || []).map(j => `<div>${j.item_name || j.id}: ${j.status} (${j.completed || 0}/${j.total_segments || 0}) ${j.status === 'running' ? `<button type="button" data-job="${j.id}" class="jpCancel">Cancel</button>` : ''}</div>`).join('');
+                        document.querySelectorAll('.jpCancel').forEach(b => b.onclick = () => ApiClient.ajax({type:'POST',url:ApiClient.getUrl('JellyProxy/Preseed/Cancel'),data:JSON.stringify({id:b.dataset.job}),contentType:'application/json'}).then(JellyProxyConfig.loadPreseedJobs));
+                    });
+                },
+                startPreseed: function () {
+                    const value = document.querySelector('#txtPreseedItem').value.trim();
+                    if (!value) return;
+                    const isUrl = value.startsWith('/') || value.startsWith('http') || value.includes('.m3u8');
+                    const payload = isUrl ? { streamUrl: value } : { itemId: value, streamUrl: '/Videos/' + value + '/main.m3u8' };
+                    ApiClient.ajax({type:'POST',url:ApiClient.getUrl('JellyProxy/Preseed/Start'),data:JSON.stringify(payload),contentType:'application/json'}).then(() => { document.querySelector('#preseedStatus').innerText='Started'; JellyProxyConfig.loadPreseedJobs(); });
                 }
             };
 
             document.querySelector('#JellyProxyConfigPage').addEventListener('pageshow', function () {
                 JellyProxyConfig.loadConfiguration();
+                JellyProxyConfig.loadPreseedJobs();
+                setInterval(JellyProxyConfig.loadPreseedJobs, 5000);
             });
+            document.querySelector('#btnStartPreseed').addEventListener('click', JellyProxyConfig.startPreseed);
 
             document.querySelector('#jellyProxyConfigForm').addEventListener('submit', JellyProxyConfig.saveConfiguration);
             document.querySelector('#btnTestProxyConnection').addEventListener('click', JellyProxyConfig.testConnection);

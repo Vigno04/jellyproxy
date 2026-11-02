@@ -48,6 +48,7 @@ type ReverseProxyHandler struct {
 	storage                *cache.StorageManager
 	sniffer                PlaylistSniffer
 	activeLiveUpstreamCount int32
+	coalescer              *cache.Coalescer
 }
 
 // SetSniffer sets the active playlist sniffer and segment tracker
@@ -121,6 +122,7 @@ func NewReverseProxyHandler(cfg *config.Config, storage *cache.StorageManager) (
 			},
 		},
 		storage: storage,
+		coalescer: cache.NewCoalescer(),
 	}, nil
 }
 
@@ -267,39 +269,9 @@ func extractItemIDFromImagePath(rawPath string) string {
 	return ""
 }
 
-// buildCacheKey creates a normalized cache key from request path, query parameters, and encoding
+// buildCacheKey delegates to the canonical cache key implementation.
 func buildCacheKey(r *http.Request, category string) string {
-	// Include Accept-Encoding distinction only for static assets where upstream might compress
-	var b strings.Builder
-	b.WriteString(category)
-	b.WriteString(":")
-	b.WriteString(r.URL.Path)
-
-	if r.URL.RawQuery != "" {
-		// Strip volatile auth tokens from cache key so identical images across sessions hit the same cache file
-		q := r.URL.Query()
-		q.Del("api_key")
-		q.Del("ApiKey")
-		q.Del("deviceId")
-		q.Del("DeviceId")
-		q.Del("device_id")
-
-		if category == cache.CategoryMedia {
-			// Strip session-specific tokens so concurrent streams share identical cached chunks
-			q.Del("PlaySessionId")
-			q.Del("playSessionId")
-			q.Del("playsessionid")
-			q.Del("liveStreamId")
-			q.Del("LiveStreamId")
-		}
-
-		encoded := q.Encode()
-		if encoded != "" {
-			b.WriteString("?")
-			b.WriteString(encoded)
-		}
-	}
-	return b.String()
+	return cache.BuildKey(category, r.URL.RequestURI())
 }
 
 func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.Request, category, itemID string) {
@@ -332,6 +304,19 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 		http.ServeContent(w, r, "media", meta.CreatedAt, file)
 		return
 	}
+
+	// Coalesce concurrent misses so only one request downloads the object.
+	call, owner := h.coalescer.Start(keyHash)
+	if !owner {
+		select {
+		case <-call.Done():
+			h.serveCachedOrFetch(w, r, category, itemID)
+		case <-r.Context().Done():
+			http.Error(w, "request cancelled", http.StatusRequestTimeout)
+		}
+		return
+	}
+	defer h.coalescer.Finish(keyHash, call)
 
 	// Cache MISS: if client sent a Range header on non-segment request, proxy directly to prevent caching partial fragments
 	if r.Header.Get("Range") != "" && category != cache.CategoryMedia {

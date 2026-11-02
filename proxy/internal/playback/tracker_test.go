@@ -130,8 +130,17 @@ func TestSessionTrackerLifecycle(t *testing.T) {
 	}
 	tracker.mu.RUnlock()
 
-	// 6. Test GET /jellyproxy/api/playback/sessions
+	// 6. Test GET /jellyproxy/api/playback/sessions (Unauthorized without secret)
+	reqSessionsUnauth := httptest.NewRequest(http.MethodGet, "/jellyproxy/api/playback/sessions", nil)
+	wSessionsUnauth := httptest.NewRecorder()
+	tracker.HandleSessions(wSessionsUnauth, reqSessionsUnauth)
+	if wSessionsUnauth.Code != http.StatusUnauthorized {
+		t.Fatalf("HandleSessions unauthenticated returned %d, want 401", wSessionsUnauth.Code)
+	}
+
+	// Authorized with secret
 	reqSessions := httptest.NewRequest(http.MethodGet, "/jellyproxy/api/playback/sessions", nil)
+	reqSessions.Header.Set("X-JellyProxy-Secret", "test-secret")
 	wSessions := httptest.NewRecorder()
 	tracker.HandleSessions(wSessions, reqSessions)
 

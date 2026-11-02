@@ -6,6 +6,8 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using JellyProxy.Configuration;
 using MediaBrowser.Controller.Configuration;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -22,6 +24,7 @@ public class JellyProxyController : ControllerBase
 {
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IServerConfigurationManager _serverConfigurationManager;
+    private readonly ILibraryManager _libraryManager;
     private readonly ILogger<JellyProxyController> _logger;
 
     /// <summary>
@@ -30,10 +33,12 @@ public class JellyProxyController : ControllerBase
     public JellyProxyController(
         IHttpClientFactory httpClientFactory,
         IServerConfigurationManager serverConfigurationManager,
+        ILibraryManager libraryManager,
         ILogger<JellyProxyController> logger)
     {
         _httpClientFactory = httpClientFactory;
         _serverConfigurationManager = serverConfigurationManager;
+        _libraryManager = libraryManager;
         _logger = logger;
     }
 
@@ -332,7 +337,41 @@ public class JellyProxyController : ControllerBase
             return StatusCode(StatusCodes.Status500InternalServerError, new { success = false, message = "Failed to update storage config on proxy: " + ex.Message });
         }
     }
+
+    [HttpPost("Preseed/Start")]
+    public async Task<ActionResult> StartPreseed([FromBody] PreseedStartRequest request)
+    {
+        var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        if (string.IsNullOrWhiteSpace(config.ProxyUrl)) return BadRequest(new { message = "Proxy URL is not configured." });
+        var itemName = request.ItemName;
+        if (string.IsNullOrWhiteSpace(itemName) && Guid.TryParse(request.ItemId, out var itemId)) itemName = _libraryManager.GetItemById(itemId)?.Name;
+        var urls = !string.IsNullOrWhiteSpace(request.StreamUrl)
+            ? new[] { request.StreamUrl }
+            : (!string.IsNullOrWhiteSpace(request.ItemId) ? new[] { $"/Videos/{request.ItemId}/main.m3u8" } : (request.Urls ?? Array.Empty<string>()));
+        var payload = new { id = request.Id, item_name = itemName, urls = urls, headers = request.Headers };
+        return await RelayPreseed(HttpMethod.Post, "start", payload, config);
+    }
+
+    [HttpGet("Preseed/Jobs")]
+    public async Task<ActionResult> GetPreseedJobs() => await RelayPreseed(HttpMethod.Get, "jobs", null, Plugin.Instance?.Configuration ?? new PluginConfiguration());
+
+    [HttpPost("Preseed/Cancel")]
+    public async Task<ActionResult> CancelPreseed([FromBody] PreseedCancelRequest request) => await RelayPreseed(HttpMethod.Post, "cancel", request, Plugin.Instance?.Configuration ?? new PluginConfiguration());
+
+    private async Task<ActionResult> RelayPreseed(HttpMethod method, string operation, object? payload, PluginConfiguration config)
+    {
+        if (string.IsNullOrWhiteSpace(config.ProxyUrl)) return BadRequest(new { message = "Proxy URL is not configured." });
+        var message = new HttpRequestMessage(method, $"{config.ProxyUrl.TrimEnd('/')}/jellyproxy/api/preseed/{operation}");
+        if (payload != null) message.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, MediaTypeNames.Application.Json);
+        if (!string.IsNullOrWhiteSpace(config.SharedSecret)) message.Headers.TryAddWithoutValidation("X-JellyProxy-Secret", config.SharedSecret);
+        var response = await _httpClientFactory.CreateClient("JellyProxy").SendAsync(message);
+        var body = await response.Content.ReadAsStringAsync();
+        return new ContentResult { StatusCode = (int)response.StatusCode, ContentType = MediaTypeNames.Application.Json, Content = body };
+    }
 }
+
+public class PreseedStartRequest { public string? Id { get; set; } public string? ItemId { get; set; } public string? ItemName { get; set; } public string? StreamUrl { get; set; } public string[]? Urls { get; set; } public System.Collections.Generic.Dictionary<string, string[]>? Headers { get; set; } }
+public class PreseedCancelRequest { public string? Id { get; set; } }
 
 /// <summary>
 /// Request DTO for testing proxy connection.
