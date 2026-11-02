@@ -277,6 +277,14 @@ func (sm *StorageManager) Get(keyHash string) (*os.File, *CacheMetadata, error) 
 	return f, &meta, nil
 }
 
+// Has checks if an entry with the given keyHash currently exists in cache
+func (sm *StorageManager) Has(keyHash string) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	_, exists := sm.entries[keyHash]
+	return exists
+}
+
 // CreateTempFile creates a temporary file in the cache temp directory for atomic streaming writes
 func (sm *StorageManager) CreateTempFile() (*os.File, error) {
 	tmpDir := filepath.Join(sm.baseDir, "tmp")

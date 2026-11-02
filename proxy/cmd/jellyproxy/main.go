@@ -13,6 +13,7 @@ import (
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/cache"
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/config"
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/handlers"
+	"github.com/jellyproxy-project/jellyproxy/proxy/internal/playback"
 )
 
 func main() {
@@ -41,6 +42,9 @@ func main() {
 		log.Fatalf("Failed to initialize reverse proxy: %v", err)
 	}
 
+	playbackTracker := playback.NewSessionTracker(cfg, storageMgr, proxyHandler.ActiveLiveUpstreamCount())
+	proxyHandler.SetSniffer(playbackTracker)
+
 	handshakeMgr := handlers.NewHandshakeManager(cfg)
 	cacheAPI := handlers.NewCacheAPIHandler(cfg, storageMgr)
 
@@ -50,6 +54,8 @@ func main() {
 	// Inter-service JellyProxy API endpoints
 	mux.HandleFunc("/jellyproxy/api/status", handshakeMgr.HandleStatus)
 	mux.HandleFunc("/jellyproxy/api/handshake", handshakeMgr.HandleHandshake)
+	mux.HandleFunc("/jellyproxy/api/playback/report", playbackTracker.HandleReport)
+	mux.HandleFunc("/jellyproxy/api/playback/sessions", playbackTracker.HandleSessions)
 	mux.HandleFunc("/jellyproxy/api/storage", cacheAPI.HandleStorage)
 	mux.HandleFunc("/jellyproxy/api/config", cacheAPI.HandleConfig)
 	mux.HandleFunc("/jellyproxy/api/cache/purge", cacheAPI.HandlePurge)

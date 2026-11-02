@@ -8,6 +8,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/cache"
@@ -32,13 +33,31 @@ var cachedResponseHeaders = []string{
 	"Content-Encoding",
 }
 
+// PlaylistSniffer is implemented by playback.SessionTracker to passively intercept HLS playlists and requests
+type PlaylistSniffer interface {
+	IngestPlaylist(playlistURL string, body string, headers http.Header)
+	OnSegmentRequested(rawURL string, headers http.Header)
+}
+
 // ReverseProxyHandler forwards traffic transparently to upstream Jellyfin with edge caching for images and static assets
 type ReverseProxyHandler struct {
-	cfg         *config.Config
-	proxy       *httputil.ReverseProxy
-	upstreamURL *url.URL
-	httpClient  *http.Client
-	storage     *cache.StorageManager
+	cfg                    *config.Config
+	proxy                  *httputil.ReverseProxy
+	upstreamURL            *url.URL
+	httpClient             *http.Client
+	storage                *cache.StorageManager
+	sniffer                PlaylistSniffer
+	activeLiveUpstreamCount int32
+}
+
+// SetSniffer sets the active playlist sniffer and segment tracker
+func (h *ReverseProxyHandler) SetSniffer(s PlaylistSniffer) {
+	h.sniffer = s
+}
+
+// ActiveLiveUpstreamCount returns a pointer to the active live upstream downloads counter
+func (h *ReverseProxyHandler) ActiveLiveUpstreamCount() *int32 {
+	return &h.activeLiveUpstreamCount
 }
 
 // NewReverseProxyHandler creates an httputil reverse proxy instance integrated with StorageManager
@@ -109,12 +128,54 @@ func NewReverseProxyHandler(cfg *config.Config, storage *cache.StorageManager) (
 func (h *ReverseProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.storage != nil && r.Method == http.MethodGet && !isWebSocket(reqOrNil(r)) {
 		if category, itemID, cacheable := classifyCacheableRequest(r.URL.Path); cacheable {
+			if category == cache.CategoryMedia && h.sniffer != nil {
+				h.sniffer.OnSegmentRequested(r.URL.RequestURI(), r.Header)
+			}
 			h.serveCachedOrFetch(w, r, category, itemID)
+			return
+		}
+
+		// Intercept HLS playlists (.m3u8) to sniff upcoming media segments for prefetch
+		if strings.HasSuffix(strings.ToLower(r.URL.Path), ".m3u8") && h.sniffer != nil {
+			h.capturePlaylist(w, r)
 			return
 		}
 	}
 
 	h.proxy.ServeHTTP(w, r)
+}
+
+func (h *ReverseProxyHandler) capturePlaylist(w http.ResponseWriter, r *http.Request) {
+	outReq, err := h.buildUpstreamRequest(r)
+	if err != nil {
+		h.proxy.ServeHTTP(w, r)
+		return
+	}
+
+	resp, err := h.httpClient.Do(outReq)
+	if err != nil {
+		h.proxy.ServeHTTP(w, r)
+		return
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "Failed to read upstream playlist", http.StatusBadGateway)
+		return
+	}
+
+	for k, vals := range resp.Header {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(bodyBytes)
+
+	if resp.StatusCode == http.StatusOK && h.sniffer != nil {
+		h.sniffer.IngestPlaylist(r.URL.RequestURI(), string(bodyBytes), r.Header)
+	}
 }
 
 func reqOrNil(r *http.Request) *http.Request {
@@ -288,6 +349,11 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 	outReq.Header.Del("Accept-Encoding")
 	outReq.Header.Del("If-None-Match")
 	outReq.Header.Del("If-Modified-Since")
+
+	if category == cache.CategoryMedia {
+		atomic.AddInt32(&h.activeLiveUpstreamCount, 1)
+		defer atomic.AddInt32(&h.activeLiveUpstreamCount, -1)
+	}
 
 	resp, err := h.httpClient.Do(outReq)
 	if err != nil {
