@@ -134,6 +134,16 @@
                             <div class="fieldDescription checkboxFieldDescription">Allows the proxy to negotiate stream bitrate and burst bandwidth fairly across concurrent clients.</div>
                         </div>
 
+                        <div class="verticalSection" style="margin-top: 2em; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 1em;">
+                            <h3 class="sectionTitle">Adaptive Bandwidth Shaper (ABR)</h3>
+                            <div class="inputContainer"><label>Upload Speed (Mbps)</label><input is="emby-input" type="number" id="txtAbrUpload" min="1" /></div>
+                            <div class="inputContainer"><label>Policy</label><select is="emby-select" id="selAbrPolicy"><option value="FairShare">Fair Share</option><option value="FirstComeFirstServed">First-Come First-Served</option></select></div>
+                            <div class="inputContainer"><label>Min Bitrate (Mbps)</label><input is="emby-input" type="number" id="txtAbrMin" min="1" /></div>
+                            <div class="inputContainer"><label>Single Client Ceiling (Mbps)</label><input is="emby-input" type="number" id="txtAbrCeiling" min="0" /></div>
+                            <div class="checkboxContainer"><label><input type="checkbox" is="emby-checkbox" id="chkAbrDegrade" /> Allow Degrading Existing Streams</label></div>
+                            <div id="abrStatus" class="fieldDescription">Bandwidth status: loading...</div>
+                        </div>
+
                         <div style="margin: 2em 0 1em 0;">
                             <button is="emby-button" type="button" class="raised button-alt" id="btnTestProxyConnection">
                                 <span>Test Connection & Pair</span>
@@ -227,6 +237,11 @@
                         document.querySelector('#chkAutoSyncPlayback').checked = config.AutoSyncPlayback !== false;
                         document.querySelector('#chkEnableBandwidthShaping').checked = config.EnableBandwidthShaping !== false;
                         document.querySelector('#txtMaxStorageGb').value = config.MaxStorageGb !== undefined ? config.MaxStorageGb : 50;
+                        document.querySelector('#txtAbrUpload').value = config.UploadSpeedMbps || 16;
+                        document.querySelector('#selAbrPolicy').value = config.ShaperPolicy || 'FairShare';
+                        document.querySelector('#chkAbrDegrade').checked = config.AllowDegradingExisting === true;
+                        document.querySelector('#txtAbrMin').value = config.MinBitrateMbps || 2;
+                        document.querySelector('#txtAbrCeiling').value = config.SingleClientCeilingMbps || 0;
 
                         if (config.LastHandshakeStatus) {
                             const statusElem = document.querySelector('#testConnectionStatus');
@@ -251,9 +266,30 @@
                         config.AutoSyncPlayback = document.querySelector('#chkAutoSyncPlayback').checked;
                         config.EnableBandwidthShaping = document.querySelector('#chkEnableBandwidthShaping').checked;
                         config.MaxStorageGb = parseFloat(document.querySelector('#txtMaxStorageGb').value) || 50.0;
+                        config.UploadSpeedMbps = parseInt(document.querySelector('#txtAbrUpload').value, 10) || 16;
+                        config.ShaperPolicy = document.querySelector('#selAbrPolicy').value || 'FairShare';
+                        config.AllowDegradingExisting = document.querySelector('#chkAbrDegrade').checked;
+                        config.MinBitrateMbps = parseInt(document.querySelector('#txtAbrMin').value, 10) || 2;
+                        config.SingleClientCeilingMbps = parseInt(document.querySelector('#txtAbrCeiling').value, 10) || 0;
+
+                        const abrPayload = {
+                            enabled: config.EnableBandwidthShaping,
+                            uploadSpeedBps: config.UploadSpeedMbps * 1000000,
+                            policy: config.ShaperPolicy,
+                            allowDegradingExistingStreams: config.AllowDegradingExisting,
+                            minBitrateBps: config.MinBitrateMbps * 1000000,
+                            singleClientCeilingBps: config.SingleClientCeilingMbps * 1000000
+                        };
+                        ApiClient.ajax({
+                            type: 'POST',
+                            url: ApiClient.getUrl('JellyProxy/Abr/Config'),
+                            data: JSON.stringify(abrPayload),
+                            contentType: 'application/json'
+                        }).catch(function() {});
 
                         ApiClient.updatePluginConfiguration(JellyProxyConfig.pluginId, config).then(function (result) {
                             Dashboard.processPluginConfigurationUpdateResult(result);
+                            JellyProxyConfig.loadAbrStatus();
                         });
                     });
                     return false;
@@ -422,6 +458,20 @@
                     });
                 },
 
+                loadAbrStatus: function () {
+                    ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Abr/Status') }).then(function (data) {
+                        const status = typeof data === 'string' ? JSON.parse(data) : data;
+                        if (!status) return;
+                        const totalMb = ((status.totalBps || 0) / 1000000).toFixed(1);
+                        const usedMb = ((status.usedBps || 0) / 1000000).toFixed(1);
+                        const active = status.activePipes || 0;
+                        const policy = (status.config && status.config.policy) || 'FairShare';
+                        document.querySelector('#abrStatus').innerText = 'Bandwidth: ' + usedMb + ' / ' + totalMb + ' Mbps used (' + active + ' active pipes, Policy: ' + policy + ')';
+                    }).catch(function () {
+                        document.querySelector('#abrStatus').innerText = 'Bandwidth shaper: ready';
+                    });
+                },
+
                 loadPreseedJobs: function () {
                     ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Preseed/Jobs') }).then(function (data) {
                         const jobs = typeof data === 'string' ? JSON.parse(data) : data;
@@ -441,7 +491,9 @@
             document.querySelector('#JellyProxyConfigPage').addEventListener('pageshow', function () {
                 JellyProxyConfig.loadConfiguration();
                 JellyProxyConfig.loadPreseedJobs();
+                JellyProxyConfig.loadAbrStatus();
                 setInterval(JellyProxyConfig.loadPreseedJobs, 5000);
+                setInterval(JellyProxyConfig.loadAbrStatus, 10000);
             });
             document.querySelector('#btnStartPreseed').addEventListener('click', JellyProxyConfig.startPreseed);
 
