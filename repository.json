@@ -1,0 +1,20 @@
+[
+  {
+    "name": "JellyProxy",
+    "guid": "E439D5E7-789A-4E2A-A9E3-2E45DAEC9312",
+    "overview": "Smart edge reverse proxy companion plugin for Jellyfin.",
+    "description": "JellyProxy companion plugin for smart edge caching, bandwidth multiplexing, and prefetching.",
+    "owner": "Vigno04",
+    "category": "General",
+    "versions": [
+      {
+        "version": "0.1.0.0",
+        "targetAbi": "10.11.6.0",
+        "sourceUrl": "https://raw.githubusercontent.com/Vigno04/jellyproxy/refs/heads/main/packages/jellyproxy-0.1.0.zip",
+        "checksum": "7af9a33b35ceb8b1291fe81560240389",
+        "timestamp": "2026-11-02T12:00:00Z",
+        "changelog": "Initial release: proxy-plugin handshake and transparent passthrough"
+      }
+    ]
+  }
+]
