@@ -93,21 +93,25 @@ public class LibraryEventNotifier : IHostedService, IDisposable
 
                 var payload = new
                 {
+                    secret = config.SharedSecret,
                     item_id = itemId,
                     type = type
                 };
 
-                var content = new StringContent(
-                    JsonSerializer.Serialize(payload),
-                    Encoding.UTF8,
-                    MediaTypeNames.Application.Json);
+                var requestMessage = new HttpRequestMessage(HttpMethod.Post, invalidateUrl)
+                {
+                    Content = new StringContent(
+                        JsonSerializer.Serialize(payload),
+                        Encoding.UTF8,
+                        MediaTypeNames.Application.Json)
+                };
 
                 if (!string.IsNullOrWhiteSpace(config.SharedSecret))
                 {
-                    content.Headers.Add("X-JellyProxy-Secret", config.SharedSecret);
+                    requestMessage.Headers.TryAddWithoutValidation("X-JellyProxy-Secret", config.SharedSecret);
                 }
 
-                var response = await client.PostAsync(invalidateUrl, content).ConfigureAwait(false);
+                var response = await client.SendAsync(requestMessage).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                 {
                     _logger.LogWarning("JellyProxy cache invalidate returned status {StatusCode} for item {ItemId}", response.StatusCode, itemId);

@@ -71,17 +71,20 @@ public class JellyProxyController : ControllerBase
                 jellyfin_version = "10.10.x"
             };
 
-            var content = new StringContent(
-                JsonSerializer.Serialize(payload),
-                Encoding.UTF8,
-                MediaTypeNames.Application.Json);
+            var requestMessage = new HttpRequestMessage(HttpMethod.Post, handshakeUrl)
+            {
+                Content = new StringContent(
+                    JsonSerializer.Serialize(payload),
+                    Encoding.UTF8,
+                    MediaTypeNames.Application.Json)
+            };
 
             if (!string.IsNullOrWhiteSpace(secret))
             {
-                content.Headers.Add("X-JellyProxy-Secret", secret);
+                requestMessage.Headers.TryAddWithoutValidation("X-JellyProxy-Secret", secret);
             }
 
-            var response = await client.PostAsync(handshakeUrl, content).ConfigureAwait(false);
+            var response = await client.SendAsync(requestMessage).ConfigureAwait(false);
             var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
             if (response.IsSuccessStatusCode)
@@ -170,19 +173,23 @@ public class JellyProxyController : ControllerBase
 
         var proxyUrl = config.ProxyUrl.TrimEnd('/');
         var storageUrl = $"{proxyUrl}/jellyproxy/api/storage";
+        if (!string.IsNullOrWhiteSpace(config.SharedSecret))
+        {
+            storageUrl += $"?secret={Uri.EscapeDataString(config.SharedSecret)}";
+        }
 
         try
         {
             var client = _httpClientFactory.CreateClient("JellyProxy");
             client.Timeout = TimeSpan.FromSeconds(10);
 
+            var requestMessage = new HttpRequestMessage(HttpMethod.Get, storageUrl);
             if (!string.IsNullOrWhiteSpace(config.SharedSecret))
             {
-                client.DefaultRequestHeaders.Remove("X-JellyProxy-Secret");
-                client.DefaultRequestHeaders.Add("X-JellyProxy-Secret", config.SharedSecret);
+                requestMessage.Headers.TryAddWithoutValidation("X-JellyProxy-Secret", config.SharedSecret);
             }
 
-            var response = await client.GetAsync(storageUrl).ConfigureAwait(false);
+            var response = await client.SendAsync(requestMessage).ConfigureAwait(false);
             var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
             if (response.IsSuccessStatusCode)
@@ -222,20 +229,24 @@ public class JellyProxyController : ControllerBase
 
             var payload = new
             {
+                secret = config.SharedSecret,
                 category = request?.Category ?? "all"
             };
 
-            var content = new StringContent(
-                JsonSerializer.Serialize(payload),
-                Encoding.UTF8,
-                MediaTypeNames.Application.Json);
+            var requestMessage = new HttpRequestMessage(HttpMethod.Post, purgeUrl)
+            {
+                Content = new StringContent(
+                    JsonSerializer.Serialize(payload),
+                    Encoding.UTF8,
+                    MediaTypeNames.Application.Json)
+            };
 
             if (!string.IsNullOrWhiteSpace(config.SharedSecret))
             {
-                content.Headers.Add("X-JellyProxy-Secret", config.SharedSecret);
+                requestMessage.Headers.TryAddWithoutValidation("X-JellyProxy-Secret", config.SharedSecret);
             }
 
-            var response = await client.PostAsync(purgeUrl, content).ConfigureAwait(false);
+            var response = await client.SendAsync(requestMessage).ConfigureAwait(false);
             var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
             if (response.IsSuccessStatusCode)
@@ -288,20 +299,24 @@ public class JellyProxyController : ControllerBase
 
             var payload = new
             {
+                secret = config.SharedSecret,
                 max_storage_gb = request.MaxStorageGb
             };
 
-            var content = new StringContent(
-                JsonSerializer.Serialize(payload),
-                Encoding.UTF8,
-                MediaTypeNames.Application.Json);
+            var requestMessage = new HttpRequestMessage(HttpMethod.Post, configUrl)
+            {
+                Content = new StringContent(
+                    JsonSerializer.Serialize(payload),
+                    Encoding.UTF8,
+                    MediaTypeNames.Application.Json)
+            };
 
             if (!string.IsNullOrWhiteSpace(config.SharedSecret))
             {
-                content.Headers.Add("X-JellyProxy-Secret", config.SharedSecret);
+                requestMessage.Headers.TryAddWithoutValidation("X-JellyProxy-Secret", config.SharedSecret);
             }
 
-            var response = await client.PostAsync(configUrl, content).ConfigureAwait(false);
+            var response = await client.SendAsync(requestMessage).ConfigureAwait(false);
             var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
             if (response.IsSuccessStatusCode)
@@ -309,12 +324,12 @@ public class JellyProxyController : ControllerBase
                 return Content(responseBody, MediaTypeNames.Application.Json);
             }
 
-            return Ok(new { success = true, message = "Local configuration saved, but proxy config update returned HTTP " + response.StatusCode, details = responseBody });
+            return StatusCode((int)response.StatusCode, new { success = false, message = "Proxy storage config update returned HTTP " + response.StatusCode, details = responseBody });
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to update storage config on proxy at {Url}", configUrl);
-            return Ok(new { success = true, message = "Local configuration saved, but failed to reach proxy: " + ex.Message });
+            return StatusCode(StatusCodes.Status500InternalServerError, new { success = false, message = "Failed to update storage config on proxy: " + ex.Message });
         }
     }
 }
