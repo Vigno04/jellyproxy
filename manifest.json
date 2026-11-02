@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "0.2.2.0",
+        "version": "0.3.0.0",
         "targetAbi": "10.11.6.0",
-        "sourceUrl": "https://raw.githubusercontent.com/Vigno04/jellyproxy/refs/heads/main/packages/jellyproxy-0.2.2.zip",
-        "checksum": "09dcdde460c168ae1fdc86ecf5e61f8c",
-        "timestamp": "2026-11-02T16:34:06Z",
-        "changelog": "Phase 2: storage management telemetry, LRU cache quota controls, cache purges, and automated library event invalidation."
+        "sourceUrl": "https://raw.githubusercontent.com/Vigno04/jellyproxy/refs/heads/main/packages/jellyproxy-0.3.0.zip",
+        "checksum": "7c576e75e55878fc74566f892ca92601",
+        "timestamp": "2026-11-02T18:24:33Z",
+        "changelog": "Phase 3: Real-time playback session tracking, pause & prefetch engine, and playlist sniffing."
       }
     ]
   }
