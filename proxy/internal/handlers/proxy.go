@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +16,10 @@ import (
 
 var staticCacheExtensions = []string{
 	".js", ".css", ".woff", ".woff2", ".svg", ".png", ".jpg", ".ico",
+}
+
+var mediaSegmentExtensions = []string{
+	".m4s", ".ts", ".mp4", ".m4a", ".aac", ".vtt", ".bif",
 }
 
 var cachedResponseHeaders = []string{
@@ -143,7 +146,35 @@ func classifyCacheableRequest(rawPath string) (category string, itemID string, o
 		return cache.CategoryImages, extractItemIDFromImagePath(rawPath), true
 	}
 
+	// 3. Media Segments (HLS fMP4 / TS / init.mp4 / subtitles / trickplay)
+	// Never cache dynamic playlists (.m3u8, .mpd)
+	if !strings.HasSuffix(lowerPath, ".m3u8") && !strings.HasSuffix(lowerPath, ".mpd") {
+		if strings.Contains(lowerPath, "/videos/") || strings.Contains(lowerPath, "/audio/") ||
+			strings.Contains(lowerPath, "/hls/") || strings.Contains(lowerPath, "/hls1/") {
+			for _, ext := range mediaSegmentExtensions {
+				if strings.HasSuffix(lowerPath, ext) {
+					return cache.CategoryMedia, extractItemIDFromMediaPath(rawPath), true
+				}
+			}
+		}
+	}
+
 	return "", "", false
+}
+
+// extractItemIDFromMediaPath parses the Jellyfin item ID from video/audio stream paths
+func extractItemIDFromMediaPath(rawPath string) string {
+	segments := strings.Split(strings.Trim(rawPath, "/"), "/")
+	for i := 0; i < len(segments)-1; i++ {
+		lower := strings.ToLower(segments[i])
+		if lower == "videos" || lower == "audio" {
+			candidate := segments[i+1]
+			if candidate != "" && !strings.Contains(candidate, ".") {
+				return candidate
+			}
+		}
+	}
+	return ""
 }
 
 // extractItemIDFromImagePath parses the Jellyfin item ID from paths like:
@@ -188,6 +219,19 @@ func buildCacheKey(r *http.Request, category string) string {
 		q := r.URL.Query()
 		q.Del("api_key")
 		q.Del("ApiKey")
+		q.Del("deviceId")
+		q.Del("DeviceId")
+		q.Del("device_id")
+
+		if category == cache.CategoryMedia {
+			// Strip session-specific tokens so concurrent streams share identical cached chunks
+			q.Del("PlaySessionId")
+			q.Del("playSessionId")
+			q.Del("playsessionid")
+			q.Del("liveStreamId")
+			q.Del("LiveStreamId")
+		}
+
 		encoded := q.Encode()
 		if encoded != "" {
 			b.WriteString("?")
@@ -220,25 +264,21 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 		if meta.LastModified != "" && w.Header().Get("Last-Modified") == "" {
 			w.Header().Set("Last-Modified", meta.LastModified)
 		}
+		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("X-JellyProxy-Cache", "HIT")
 
-		// Handle conditional requests (If-None-Match)
-		if clientETag := r.Header.Get("If-None-Match"); clientETag != "" && meta.ETag != "" {
-			if clientETag == meta.ETag || clientETag == "*" {
-				w.WriteHeader(http.StatusNotModified)
-				return
-			}
-		}
-
-		if meta.Size > 0 {
-			w.Header().Set("Content-Length", strconv.FormatInt(meta.Size, 10))
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.Copy(w, file)
+		// Serve using http.ServeContent to support HTTP Range requests (206 Partial Content), ETag, and If-Modified-Since
+		http.ServeContent(w, r, "media", meta.CreatedAt, file)
 		return
 	}
 
-	// Cache MISS: fetch from upstream
+	// Cache MISS: if client sent a Range header on non-segment request, proxy directly to prevent caching partial fragments
+	if r.Header.Get("Range") != "" && category != cache.CategoryMedia {
+		h.proxy.ServeHTTP(w, r)
+		return
+	}
+
+	// Fetch from upstream
 	outReq, err := h.buildUpstreamRequest(r)
 	if err != nil {
 		h.proxy.ServeHTTP(w, r)
