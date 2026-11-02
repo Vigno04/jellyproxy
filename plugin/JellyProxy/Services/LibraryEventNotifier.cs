@@ -70,7 +70,7 @@ public class LibraryEventNotifier : IHostedService, IDisposable
             return;
         }
 
-        FireInvalidate(e.Item.Id.ToString("N"), "image");
+        FireInvalidate(e.Item.Id.ToString("N"), "all");
     }
 
     private void FireInvalidate(string itemId, string type)
