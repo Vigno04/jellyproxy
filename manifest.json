@@ -8,11 +8,11 @@
     "category": "General",
     "versions": [
       {
-        "version": "0.2.0.0",
+        "version": "0.2.1.0",
         "targetAbi": "10.11.6.0",
-        "sourceUrl": "https://raw.githubusercontent.com/Vigno04/jellyproxy/refs/heads/main/packages/jellyproxy-0.2.0.zip",
-        "checksum": "28acccd8b5f328c714051b3e579e6d30",
-        "timestamp": "2026-11-02T15:20:29Z",
+        "sourceUrl": "https://raw.githubusercontent.com/Vigno04/jellyproxy/refs/heads/main/packages/jellyproxy-0.2.1.zip",
+        "checksum": "0f5cced856fab438c7dcf9fff75e57dd",
+        "timestamp": "2026-11-02T15:30:47Z",
         "changelog": "Phase 2: storage management telemetry, LRU cache quota controls, cache purges, and automated library event invalidation."
       }
     ]
