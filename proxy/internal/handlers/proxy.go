@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"bytes"
 	"crypto/tls"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -13,6 +16,7 @@ import (
 
 	"github.com/Vigno04/jellyproxy/proxy/internal/cache"
 	"github.com/Vigno04/jellyproxy/proxy/internal/config"
+	"github.com/Vigno04/jellyproxy/proxy/internal/abr"
 )
 
 var staticCacheExtensions = []string{
@@ -49,6 +53,7 @@ type ReverseProxyHandler struct {
 	sniffer                PlaylistSniffer
 	activeLiveUpstreamCount int32
 	coalescer              *cache.Coalescer
+	abr                    *abr.BandwidthManager
 }
 
 // SetSniffer sets the active playlist sniffer and segment tracker
@@ -123,11 +128,16 @@ func NewReverseProxyHandler(cfg *config.Config, storage *cache.StorageManager) (
 		},
 		storage: storage,
 		coalescer: cache.NewCoalescer(),
+		abr: abr.NewBandwidthManager(abr.Config{Enabled: true, UploadSpeedBps: 16_000_000}),
 	}, nil
 }
 
 // ServeHTTP inspects requests for cache eligibility and either serves from cache, tees from upstream, or passes through
 func (h *ReverseProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.abr != nil && r.Method == http.MethodPost && strings.HasSuffix(strings.ToLower(r.URL.Path), "/playbackinfo") {
+		h.servePlaybackInfo(w, r)
+		return
+	}
 	if h.storage != nil && r.Method == http.MethodGet && !isWebSocket(reqOrNil(r)) {
 		if category, itemID, cacheable := classifyCacheableRequest(r.URL.Path); cacheable {
 			if category == cache.CategoryMedia && h.sniffer != nil {
@@ -167,6 +177,10 @@ func (h *ReverseProxyHandler) capturePlaylist(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if resp.StatusCode == http.StatusOK && strings.HasSuffix(strings.ToLower(r.URL.Path), "master.m3u8") && h.abr != nil {
+		bodyBytes = h.filterMasterPlaylist(r, bodyBytes)
+	}
+
 	for k, vals := range resp.Header {
 		for _, v := range vals {
 			w.Header().Add(k, v)
@@ -178,6 +192,81 @@ func (h *ReverseProxyHandler) capturePlaylist(w http.ResponseWriter, r *http.Req
 	if resp.StatusCode == http.StatusOK && h.sniffer != nil {
 		h.sniffer.IngestPlaylist(r.URL.RequestURI(), string(bodyBytes), r.Header)
 	}
+}
+
+func (h *ReverseProxyHandler) filterMasterPlaylist(r *http.Request, body []byte) []byte {
+	client := r.URL.Query().Get("DeviceId")
+	if client == "" { client = r.URL.Query().Get("PlaySessionId") }
+	if client == "" { client = r.RemoteAddr }
+	status := h.abr.GetStatus()
+	var clientAlloc int64
+	for _, p := range status.Pipes {
+		if p.AllocatedBps > 0 { clientAlloc = p.AllocatedBps; break }
+	}
+	if clientAlloc <= 0 { return body }
+
+	lines := strings.Split(string(body), "\n")
+	type variant struct {
+		inf  string
+		url  string
+		bw   int64
+	}
+	var variants []variant
+	var otherLines []string
+	var minBw int64 = 1<<62 - 1
+
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#EXT-X-STREAM-INF:") {
+			var bw int64
+			for _, part := range strings.Split(strings.TrimPrefix(trimmed, "#EXT-X-STREAM-INF:"), ",") {
+				if strings.HasPrefix(part, "BANDWIDTH=") {
+					fmt.Sscanf(strings.TrimPrefix(part, "BANDWIDTH="), "%d", &bw)
+				}
+			}
+			urlLine := ""
+			if i+1 < len(lines) {
+				urlLine = lines[i+1]
+				i++
+			}
+			if bw > 0 && bw < minBw { minBw = bw }
+			variants = append(variants, variant{inf: line, url: urlLine, bw: bw})
+		} else {
+			otherLines = append(otherLines, line)
+		}
+	}
+
+	if len(variants) == 0 { return body }
+
+	var filtered []string
+	for _, v := range variants {
+		// Retain variants <= clientAlloc or the absolute lowest fallback variant
+		if v.bw <= clientAlloc || v.bw == minBw {
+			filtered = append(filtered, v.inf, v.url)
+		}
+	}
+
+	// Reconstruct playlist
+	var out []string
+	for _, l := range otherLines {
+		out = append(out, l)
+		if strings.HasPrefix(strings.TrimSpace(l), "#EXTM3U") {
+			out = append(out, filtered...)
+		}
+	}
+	return []byte(strings.Join(out, "\n"))
+}
+
+func (h *ReverseProxyHandler) servePlaybackInfo(w http.ResponseWriter, r *http.Request) {
+	item := "unknown"
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	for i := 0; i+1 < len(parts); i++ { if strings.EqualFold(parts[i], "Items") { item=parts[i+1]; break } }
+	client := r.URL.Query().Get("DeviceId"); if client=="" {client=r.URL.Query().Get("PlaySessionId")}; if client=="" {client=r.RemoteAddr}
+	requested:=int64(0); if v:=r.URL.Query().Get("maxStreamingBitrate");v!="" { for _,c:=range v {if c>='0'&&c<='9' {requested=requested*10+int64(c-'0')}} }; if requested==0 {requested=100_000_000}
+	alloc:=h.abr.Allocate(client,item,requested); q:=r.URL.Query();q.Set("maxStreamingBitrate",fmt.Sprint(alloc));r.URL.RawQuery=q.Encode()
+	if r.Body!=nil {b,_:=io.ReadAll(r.Body); var v map[string]any; if json.Unmarshal(b,&v)==nil { for _,k:=range []string{"MaxStreamingBitrate","MaxStaticBitrate"}{v[k]=alloc}; if d,ok:=v["DeviceProfile"].(map[string]any);ok {d["MaxStreamingBitrate"]=alloc}; b,_=json.Marshal(v);r.Body=io.NopCloser(bytes.NewReader(b));r.ContentLength=int64(len(b)) } }
+	h.proxy.ServeHTTP(w,r)
 }
 
 func reqOrNil(r *http.Request) *http.Request {

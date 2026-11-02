@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Vigno04/jellyproxy/proxy/internal/cache"
+	"github.com/Vigno04/jellyproxy/proxy/internal/abr"
 	"github.com/Vigno04/jellyproxy/proxy/internal/config"
 	"github.com/Vigno04/jellyproxy/proxy/internal/auth"
 	"github.com/Vigno04/jellyproxy/proxy/internal/handlers"
@@ -50,6 +51,8 @@ func main() {
 	handshakeMgr := handlers.NewHandshakeManager(cfg)
 	cacheAPI := handlers.NewCacheAPIHandler(cfg, storageMgr)
 	preseedAPI := handlers.NewPreseedAPI(cfg, preseed.NewManager(storageMgr, cfg.UpstreamURL, cfg.UpstreamHost, proxyHandler.ActiveLiveUpstreamCount()))
+	abrManager := abr.NewBandwidthManager(abr.Config{Enabled: true, UploadSpeedBps: 16_000_000})
+	abrAPI := &handlers.ABRAPI{Manager: abrManager}
 
 	// Custom router multiplexer
 	mux := http.NewServeMux()
@@ -66,6 +69,8 @@ func main() {
 	mux.HandleFunc("/jellyproxy/api/preseed/start", preseedAPI.Handler(preseedAPI.Start))
 	mux.HandleFunc("/jellyproxy/api/preseed/jobs", preseedAPI.Handler(preseedAPI.Jobs))
 	mux.HandleFunc("/jellyproxy/api/preseed/cancel", preseedAPI.Handler(preseedAPI.Cancel))
+	mux.HandleFunc("/jellyproxy/api/abr/config", auth.RequireSecret(cfg.SharedSecret, abrAPI.Config))
+	mux.HandleFunc("/jellyproxy/api/abr/status", auth.RequireSecret(cfg.SharedSecret, abrAPI.Status))
 
 	// Catch-all: forward all standard Jellyfin traffic to upstream (with caching)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

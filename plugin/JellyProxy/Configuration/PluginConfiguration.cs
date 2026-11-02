@@ -28,6 +28,11 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Gets or sets a value indicating whether intelligent bandwidth shaping is requested.
     /// </summary>
     public bool EnableBandwidthShaping { get; set; } = true;
+    public int UploadSpeedMbps { get; set; } = 16;
+    public string ShaperPolicy { get; set; } = "FairShare";
+    public bool AllowDegradingExisting { get; set; }
+    public int MinBitrateMbps { get; set; } = 2;
+    public int SingleClientCeilingMbps { get; set; }
 
     /// <summary>
     /// Gets or sets the timestamp of the last successful handshake with the proxy.

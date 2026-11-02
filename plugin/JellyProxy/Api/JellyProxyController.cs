@@ -166,6 +166,23 @@ public class JellyProxyController : ControllerBase
     /// <summary>
     /// Fetches storage usage statistics from JellyProxy.
     /// </summary>
+    [HttpGet("Abr/Status")]
+    public async Task<ActionResult> GetAbrStatus() => await RelayAbr(HttpMethod.Get, "status", null);
+
+    [HttpPost("Abr/Config")]
+    public async Task<ActionResult> UpdateAbrConfig([FromBody] object request) => await RelayAbr(HttpMethod.Post, "config", request);
+
+    private async Task<ActionResult> RelayAbr(HttpMethod method, string operation, object? payload)
+    {
+        var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        if (string.IsNullOrWhiteSpace(config.ProxyUrl)) return BadRequest(new { message = "Proxy URL is not configured." });
+        var message = new HttpRequestMessage(method, $"{config.ProxyUrl.TrimEnd('/')}/jellyproxy/api/abr/{operation}");
+        if (payload != null) message.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, MediaTypeNames.Application.Json);
+        if (!string.IsNullOrWhiteSpace(config.SharedSecret)) message.Headers.TryAddWithoutValidation("X-JellyProxy-Secret", config.SharedSecret);
+        var response = await _httpClientFactory.CreateClient("JellyProxy").SendAsync(message);
+        return new ContentResult { StatusCode = (int)response.StatusCode, ContentType = MediaTypeNames.Application.Json, Content = await response.Content.ReadAsStringAsync() };
+    }
+
     [HttpGet("Storage")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public async Task<ActionResult<object>> GetStorage()
