@@ -320,6 +320,22 @@ public class JellyProxyController : ControllerBase
 }
 
 /// <summary>
+/// Request DTO for testing proxy connection.
+/// </summary>
+public class TestConnectionRequest
+{
+    /// <summary>
+    /// Gets or sets the target proxy URL.
+    /// </summary>
+    public string? ProxyUrl { get; set; }
+
+    /// <summary>
+    /// Gets or sets the shared secret token.
+    /// </summary>
+    public string? SharedSecret { get; set; }
+}
+
+/// <summary>
 /// Request DTO for cache purge.
 /// </summary>
 public class PurgeRequest
