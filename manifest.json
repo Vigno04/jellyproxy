@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "0.4.0.0",
+        "version": "0.5.0.0",
         "targetAbi": "10.11.6.0",
-        "sourceUrl": "https://raw.githubusercontent.com/jellyproxy-project/jellyproxy/refs/heads/main/packages/jellyproxy-0.4.0.zip",
-        "checksum": "bbef86be4fe78fad942994c80bf4d763",
-        "timestamp": "2026-11-02T23:26:20Z",
-        "changelog": "Phase 4: SyncPlay single-pull request coalescing, Movie Night pre-seeding pipeline, and hardened API authentication."
+        "sourceUrl": "https://raw.githubusercontent.com/jellyproxy-project/jellyproxy/refs/heads/main/packages/jellyproxy-0.5.0.zip",
+        "checksum": "55d24632db9c1aee0166331247ddcd62",
+        "timestamp": "2026-11-02T23:44:20Z",
+        "changelog": "Phase 5: Adaptive Bandwidth Shaper (ABR), dynamic PlaybackInfo bitrate negotiation, water-filling allocation, and HLS master variant filtering."
       }
     ]
   }
