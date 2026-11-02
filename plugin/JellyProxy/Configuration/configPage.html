@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>JellyProxy</title>
+</head>
+<body>
+    <div id="JellyProxyConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+        <div data-role="content">
+            <div class="content-primary">
+                <form id="jellyProxyConfigForm">
+                    <div class="verticalSection verticalSection-extrabottompadding">
+                        <div class="sectionTitleContainer flex align-items-center">
+                            <h2 class="sectionTitle">JellyProxy Settings</h2>
+                            <a is="emby-button" class="raised button-alt headerHelpButton" target="_blank" href="https://github.com/Vigno04/jellyproxy">GitHub</a>
+                        </div>
+                        <p>JellyProxy acts as an edge caching, bandwidth multiplexer, and prefetching orchestrator between your Jellyfin server and remote clients.</p>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="txtProxyUrl">Proxy Edge URL:</label>
+                            <input is="emby-input" type="text" id="txtProxyUrl" name="ProxyUrl" required placeholder="http://vps-ip:8080 or https://jellyproxy.domain.tld" />
+                            <div class="fieldDescription">The public URL of your JellyProxy Docker container deployed on your VPS or cloud host.</div>
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel inputLabelUnfocused" for="txtSharedSecret">Shared Secret Token:</label>
+                            <input is="emby-input" type="password" id="txtSharedSecret" name="SharedSecret" placeholder="Enter secure shared secret..." />
+                            <div class="fieldDescription">Optional shared token for authenticating control communications between this plugin and JellyProxy.</div>
+                        </div>
+
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label>
+                                <input type="checkbox" is="emby-checkbox" id="chkAutoSyncPlayback" name="AutoSyncPlayback" />
+                                <span>Monitor Playback Sessions</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">Notifies proxy of live playback state (pause, seek, resume) for intelligent prefetch.</div>
+                        </div>
+
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label>
+                                <input type="checkbox" is="emby-checkbox" id="chkEnableBandwidthShaping" name="EnableBandwidthShaping" />
+                                <span>Enable Adaptive Bandwidth Orchestration</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">Allows the proxy to negotiate stream bitrate and burst bandwidth fairly across concurrent clients.</div>
+                        </div>
+
+                        <div style="margin: 2em 0 1em 0;">
+                            <button is="emby-button" type="button" class="raised button-alt" id="btnTestProxyConnection">
+                                <span>Test Connection & Pair</span>
+                            </button>
+                            <span id="testConnectionStatus" style="margin-left: 1em; font-weight: bold;"></span>
+                        </div>
+
+                        <div>
+                            <button is="emby-button" type="submit" class="raised button-submit block">
+                                <span>Save Configuration</span>
+                            </button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <script type="text/javascript">
+            const JellyProxyConfig = {
+                pluginId: 'e439d5e7-789a-4e2a-a9e3-2e45daec9312',
+
+                loadConfiguration: function () {
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(JellyProxyConfig.pluginId).then(function (config) {
+                        document.querySelector('#txtProxyUrl').value = config.ProxyUrl || 'http://localhost:8080';
+                        document.querySelector('#txtSharedSecret').value = config.SharedSecret || '';
+                        document.querySelector('#chkAutoSyncPlayback').checked = config.AutoSyncPlayback !== false;
+                        document.querySelector('#chkEnableBandwidthShaping').checked = config.EnableBandwidthShaping !== false;
+
+                        if (config.LastHandshakeStatus) {
+                            const statusElem = document.querySelector('#testConnectionStatus');
+                            statusElem.innerText = 'Last status: ' + config.LastHandshakeStatus;
+                            statusElem.style.color = config.LastHandshakeStatus.indexOf('verified') !== -1 ? '#4caf50' : '#ffa000';
+                        }
+
+                        Dashboard.hideLoadingMsg();
+                    }).catch(function () {
+                        Dashboard.hideLoadingMsg();
+                    });
+                },
+
+                saveConfiguration: function (e) {
+                    e.preventDefault();
+                    Dashboard.showLoadingMsg();
+
+                    ApiClient.getPluginConfiguration(JellyProxyConfig.pluginId).then(function (config) {
+                        config.ProxyUrl = document.querySelector('#txtProxyUrl').value;
+                        config.SharedSecret = document.querySelector('#txtSharedSecret').value;
+                        config.AutoSyncPlayback = document.querySelector('#chkAutoSyncPlayback').checked;
+                        config.EnableBandwidthShaping = document.querySelector('#chkEnableBandwidthShaping').checked;
+
+                        ApiClient.updatePluginConfiguration(JellyProxyConfig.pluginId, config).then(function (result) {
+                            Dashboard.processPluginConfigurationUpdateResult(result);
+                        });
+                    });
+                    return false;
+                },
+
+                testConnection: function () {
+                    const statusElem = document.querySelector('#testConnectionStatus');
+                    statusElem.innerText = 'Testing handshake with proxy...';
+                    statusElem.style.color = '#2196f3';
+
+                    const payload = {
+                        ProxyUrl: document.querySelector('#txtProxyUrl').value,
+                        SharedSecret: document.querySelector('#txtSharedSecret').value
+                    };
+
+                    ApiClient.ajax({
+                        type: 'POST',
+                        url: ApiClient.getUrl('JellyProxy/TestConnection'),
+                        data: JSON.stringify(payload),
+                        contentType: 'application/json'
+                    }).then(function (response) {
+                        if (response && response.success) {
+                            statusElem.innerText = '✓ ' + response.message;
+                            statusElem.style.color = '#4caf50';
+                        } else {
+                            statusElem.innerText = '✗ ' + (response.message || 'Connection failed');
+                            statusElem.style.color = '#f44336';
+                        }
+                    }).catch(function (err) {
+                        statusElem.innerText = '✗ Network error contacting Jellyfin plugin API';
+                        statusElem.style.color = '#f44336';
+                    });
+                }
+            };
+
+            document.querySelector('#JellyProxyConfigPage').addEventListener('pageshow', function () {
+                JellyProxyConfig.loadConfiguration();
+            });
+
+            document.querySelector('#jellyProxyConfigForm').addEventListener('submit', JellyProxyConfig.saveConfiguration);
+            document.querySelector('#btnTestProxyConnection').addEventListener('click', JellyProxyConfig.testConnection);
+        </script>
+    </div>
+</body>
+</html>

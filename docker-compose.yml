@@ -1,0 +1,21 @@
+services:
+  jellyproxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: jellyproxy
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - UPSTREAM_URL=http://homeserver.local:8096 # URL of your Jellyfin master server
+      - SHARED_SECRET=your_super_secret_token_here
+      - CACHE_DIR=/var/cache/jellyproxy
+      - LOG_LEVEL=info
+    volumes:
+      - jellyproxy_cache:/var/cache/jellyproxy
+
+volumes:
+  jellyproxy_cache:
+    driver: local
