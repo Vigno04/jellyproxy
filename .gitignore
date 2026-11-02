@@ -5,9 +5,7 @@ obj/
 *.exe
 *.so
 *.dylib
-jellyproxy
-
-# Go
+/jellyproxy
 proxy/jellyproxy
 vendor/
 
