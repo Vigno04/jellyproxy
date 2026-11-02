@@ -2,6 +2,97 @@
 <html lang="en">
 <head>
     <title>JellyProxy</title>
+    <style>
+        .storageSummaryRow {
+            display: flex;
+            justify-content: space-between;
+            gap: 1em;
+            margin-bottom: .5em;
+            font-weight: 500;
+        }
+
+        .storageSummaryRow span:first-child {
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+
+        .storageProgress {
+            display: flex;
+            width: 100%;
+            height: 24px;
+            overflow: hidden;
+            border-radius: 4px;
+            background: rgba(255,255,255,.1);
+        }
+
+        .storageSegment {
+            width: 0;
+            min-width: 0;
+            transition: width .3s ease;
+        }
+
+        .storageImages { background: #2196f3; }
+        .storageStatic { background: #ff9800; }
+        .storageMedia { background: #4caf50; }
+        .storageFree { background: rgba(255,255,255,.2); }
+
+        .storageLegend {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: .65em 1em;
+            margin-top: .8em;
+            font-size: .9em;
+            opacity: .8;
+        }
+
+        .storageLegend > span {
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+
+        .legendSwatch {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            margin-right: 4px;
+            border-radius: 2px;
+            vertical-align: -1px;
+        }
+
+        .storageActions {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: .75em;
+            margin-top: 1.5em;
+        }
+
+        .storageActions button {
+            width: 100%;
+            min-width: 0;
+            margin: 0;
+        }
+
+        .storageActions #btnRefreshStorage {
+            grid-column: 1 / -1;
+        }
+
+        @media (max-width: 500px) {
+            .storageSummaryRow {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: .2em;
+            }
+
+            .storageLegend,
+            .storageActions {
+                grid-template-columns: 1fr;
+            }
+
+            .storageActions #btnRefreshStorage {
+                grid-column: auto;
+            }
+        }
+    </style>
 </head>
 <body>
     <div id="JellyProxyConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
@@ -11,13 +102,13 @@
                     <div class="verticalSection verticalSection-extrabottompadding">
                         <div class="sectionTitleContainer flex align-items-center">
                             <h2 class="sectionTitle">JellyProxy Settings</h2>
-                            <a is="emby-button" class="raised button-alt headerHelpButton" target="_blank" href="[https://github.com/jellyproxy-project/jellyproxy](https://github.com/jellyproxy-project/jellyproxy)">GitHub</a>
+                            <a is="emby-button" class="raised button-alt headerHelpButton" target="_blank" href="https://github.com/jellyproxy-project/jellyproxy">GitHub</a>
                         </div>
                         <p>JellyProxy acts as an edge caching, bandwidth multiplexer, and prefetching orchestrator between your Jellyfin server and remote clients.</p>
 
                         <div class="inputContainer">
                             <label class="inputLabel inputLabelUnfocused" for="txtProxyUrl">Proxy Edge URL:</label>
-                            <input is="emby-input" type="text" id="txtProxyUrl" name="ProxyUrl" required placeholder="http://vps-ip:8080 or [https://jellyproxy.domain.tld](https://jellyproxy.domain.tld)" />
+                            <input is="emby-input" type="text" id="txtProxyUrl" name="ProxyUrl" required placeholder="http://vps-ip:8080 or https://jellyproxy.domain.tld" />
                             <div class="fieldDescription">The public URL of your JellyProxy Docker container deployed on your VPS or cloud host.</div>
                         </div>
 
@@ -70,24 +161,24 @@
 
                             <!-- Storage Progress Bar -->
                             <div style="margin: 1.5em 0;">
-                                <div style="display: flex; justify-content: space-between; margin-bottom: 0.5em; font-weight: 500;">
+                                <div class="storageSummaryRow">
                                     <span id="lblStorageSummary">Storage Usage: Loading...</span>
                                     <span id="lblStoragePercent">0%</span>
                                 </div>
-                                <div style="background: rgba(255,255,255,0.1); height: 24px; border-radius: 4px; overflow: hidden; display: flex;">
-                                    <div id="barImages" style="background: #2196f3; width: 0%; transition: width 0.3s;" title="Images"></div>
-                                    <div id="barStatic" style="background: #ff9800; width: 0%; transition: width 0.3s;" title="Static Assets"></div>
-                                    <div id="barMedia" style="background: #4caf50; width: 0%; transition: width 0.3s;" title="Media Segments"></div>
+                                <div class="storageProgress" role="progressbar" aria-label="Storage usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                                    <div id="barImages" class="storageSegment storageImages" title="Images"></div>
+                                    <div id="barStatic" class="storageSegment storageStatic" title="Static Assets"></div>
+                                    <div id="barMedia" class="storageSegment storageMedia" title="Media Segments"></div>
                                 </div>
-                                <div style="display: flex; gap: 1.5em; margin-top: 0.8em; font-size: 0.9em; opacity: 0.8;">
-                                    <span><span style="display:inline-block;width:12px;height:12px;background:#2196f3;border-radius:2px;margin-right:4px;"></span> Images (<span id="statImages">0 MB</span>)</span>
-                                    <span><span style="display:inline-block;width:12px;height:12px;background:#ff9800;border-radius:2px;margin-right:4px;"></span> Static Assets (<span id="statStatic">0 MB</span>)</span>
-                                    <span><span style="display:inline-block;width:12px;height:12px;background:#4caf50;border-radius:2px;margin-right:4px;"></span> Media Segments (<span id="statMedia">0 MB</span>)</span>
-                                    <span><span style="display:inline-block;width:12px;height:12px;background:rgba(255,255,255,0.2);border-radius:2px;margin-right:4px;"></span> Free (<span id="statFree">0 GB</span>)</span>
+                                <div class="storageLegend">
+                                    <span><i class="legendSwatch storageImages"></i>Images (<span id="statImages">0 MB</span>)</span>
+                                    <span><i class="legendSwatch storageStatic"></i>Static Assets (<span id="statStatic">0 MB</span>)</span>
+                                    <span><i class="legendSwatch storageMedia"></i>Media Segments (<span id="statMedia">0 MB</span>)</span>
+                                    <span><i class="legendSwatch storageFree"></i>Free (<span id="statFree">0 GB</span>)</span>
                                 </div>
                             </div>
 
-                            <div style="display: flex; gap: 1em; align-items: center; flex-wrap: wrap; margin-top: 1.5em;">
+                            <div class="storageActions">
                                 <button is="emby-button" type="button" class="raised button-alt" id="btnRefreshStorage">
                                     <span>Refresh Storage Stats</span>
                                 </button>
@@ -233,6 +324,9 @@
                         const imgPct = maxQuotaBytes > 0 ? (imagesBytes / maxQuotaBytes) * 100 : 0;
                         const staticPct = maxQuotaBytes > 0 ? (staticBytes / maxQuotaBytes) * 100 : 0;
                         const mediaPct = maxQuotaBytes > 0 ? (mediaBytes / maxQuotaBytes) * 100 : 0;
+                        const usageBar = document.querySelector('.storageProgress');
+                        const usagePercent = Number(percentUsed) || 0;
+                        if (usageBar) usageBar.setAttribute('aria-valuenow', usagePercent.toString());
 
                         document.querySelector('#barImages').style.width = imgPct + '%';
                         document.querySelector('#barStatic').style.width = staticPct + '%';
