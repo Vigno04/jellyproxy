@@ -272,25 +272,31 @@
                         config.MinBitrateMbps = parseInt(document.querySelector('#txtAbrMin').value, 10) || 2;
                         config.SingleClientCeilingMbps = parseInt(document.querySelector('#txtAbrCeiling').value, 10) || 0;
 
-                        const abrPayload = {
-                            enabled: config.EnableBandwidthShaping,
-                            uploadSpeedBps: config.UploadSpeedMbps * 1000000,
-                            policy: config.ShaperPolicy,
-                            allowDegradingExistingStreams: config.AllowDegradingExisting,
-                            minBitrateBps: config.MinBitrateMbps * 1000000,
-                            singleClientCeilingBps: config.SingleClientCeilingMbps * 1000000
-                        };
-                        ApiClient.ajax({
-                            type: 'POST',
-                            url: ApiClient.getUrl('JellyProxy/Abr/Config'),
-                            data: JSON.stringify(abrPayload),
-                            contentType: 'application/json'
-                        }).catch(function() {});
-
                         ApiClient.updatePluginConfiguration(JellyProxyConfig.pluginId, config).then(function (result) {
                             Dashboard.processPluginConfigurationUpdateResult(result);
-                            JellyProxyConfig.loadAbrStatus();
+                            const abrPayload = {
+                                enabled: config.EnableBandwidthShaping,
+                                uploadSpeedBps: config.UploadSpeedMbps * 1000000,
+                                policy: config.ShaperPolicy,
+                                allowDegradingExistingStreams: config.AllowDegradingExisting,
+                                minBitrateBps: config.MinBitrateMbps * 1000000,
+                                singleClientCeilingBps: config.SingleClientCeilingMbps * 1000000
+                            };
+                            ApiClient.ajax({
+                                type: 'POST',
+                                url: ApiClient.getUrl('JellyProxy/Abr/Config'),
+                                data: JSON.stringify(abrPayload),
+                                contentType: 'application/json'
+                            }).catch(function() {}).then(function() {
+                                JellyProxyConfig.loadAbrStatus();
+                            });
+                        }).catch(function (err) {
+                            Dashboard.hideLoadingMsg();
+                            console.error('Failed to update plugin configuration:', err);
                         });
+                    }).catch(function (err) {
+                        Dashboard.hideLoadingMsg();
+                        console.error('Failed to get plugin configuration:', err);
                     });
                     return false;
                 },
@@ -427,7 +433,7 @@
 
                 purgeCache: function (category) {
                     const statusElem = document.querySelector('#purgeStatus');
-                    statusElem.innerText = `Purging cache (${category})...`;
+                    statusElem.innerText = 'Purging cache (' + category + ')...';
                     statusElem.style.color = '#2196f3';
 
                     const payload = {
@@ -448,10 +454,10 @@
                         }
                         return response;
                     }).then(function (data) {
-                        statusElem.innerText = `✓ Purge successful (${category})!`;
+                        statusElem.innerText = '✓ Purge successful (' + category + ')!';
                         statusElem.style.color = '#4caf50';
                         JellyProxyConfig.loadStorageStats();
-                        setTimeout(() => { statusElem.innerText = ''; }, 4000);
+                        setTimeout(function () { statusElem.innerText = ''; }, 4000);
                     }).catch(function (err) {
                         statusElem.innerText = '✗ Purge failed: ' + (err.message || err);
                         statusElem.style.color = '#f44336';
@@ -459,51 +465,123 @@
                 },
 
                 loadAbrStatus: function () {
-                    ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Abr/Status') }).then(function (data) {
-                        const status = typeof data === 'string' ? JSON.parse(data) : data;
-                        if (!status) return;
-                        const totalMb = ((status.totalBps || 0) / 1000000).toFixed(1);
-                        const usedMb = ((status.usedBps || 0) / 1000000).toFixed(1);
-                        const active = status.activePipes || 0;
-                        const policy = (status.config && status.config.policy) || 'FairShare';
-                        document.querySelector('#abrStatus').innerText = 'Bandwidth: ' + usedMb + ' / ' + totalMb + ' Mbps used (' + active + ' active pipes, Policy: ' + policy + ')';
+                    ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Abr/Status') }).then(function (response) {
+                        if (response && typeof response.json === 'function') {
+                            return response.json();
+                        }
+                        if (typeof response === 'string') {
+                            try { return JSON.parse(response); } catch (e) {}
+                        }
+                        return response;
+                    }).then(function (data) {
+                        const status = (typeof data === 'string' ? JSON.parse(data) : data) || {};
+                        const totalMb = (((status.totalBps ?? status.TotalBps) || 0) / 1000000).toFixed(1);
+                        const usedMb = (((status.usedBps ?? status.UsedBps) || 0) / 1000000).toFixed(1);
+                        const active = (status.activePipes ?? status.ActivePipes) || 0;
+                        const cfg = status.config || status.Config || {};
+                        const policy = cfg.policy || cfg.Policy || 'FairShare';
+                        const elem = document.querySelector('#abrStatus');
+                        if (elem) {
+                            elem.innerText = 'Bandwidth: ' + usedMb + ' / ' + totalMb + ' Mbps used (' + active + ' active pipes, Policy: ' + policy + ')';
+                        }
                     }).catch(function () {
-                        document.querySelector('#abrStatus').innerText = 'Bandwidth shaper: ready';
+                        const elem = document.querySelector('#abrStatus');
+                        if (elem) elem.innerText = 'Bandwidth shaper: ready';
                     });
                 },
 
                 loadPreseedJobs: function () {
-                    ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Preseed/Jobs') }).then(function (data) {
-                        const jobs = typeof data === 'string' ? JSON.parse(data) : data;
-                        document.querySelector('#preseedJobs').innerHTML = (jobs || []).map(j => `<div>${j.item_name || j.id}: ${j.status} (${j.completed || 0}/${j.total_segments || 0}) ${j.status === 'running' ? `<button type="button" data-job="${j.id}" class="jpCancel">Cancel</button>` : ''}</div>`).join('');
-                        document.querySelectorAll('.jpCancel').forEach(b => b.onclick = () => ApiClient.ajax({type:'POST',url:ApiClient.getUrl('JellyProxy/Preseed/Cancel'),data:JSON.stringify({id:b.dataset.job}),contentType:'application/json'}).then(JellyProxyConfig.loadPreseedJobs));
-                    });
+                    ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Preseed/Jobs') }).then(function (response) {
+                        if (response && typeof response.json === 'function') {
+                            return response.json();
+                        }
+                        if (typeof response === 'string') {
+                            try { return JSON.parse(response); } catch (e) {}
+                        }
+                        return response;
+                    }).then(function (data) {
+                        const jobs = (typeof data === 'string' ? JSON.parse(data) : data) || [];
+                        const container = document.querySelector('#preseedJobs');
+                        if (!container) return;
+                        if (!Array.isArray(jobs) || jobs.length === 0) {
+                            container.innerHTML = '<div style="opacity: 0.7; font-size: 0.9em;">No active pre-seeding jobs.</div>';
+                            return;
+                        }
+                        container.innerHTML = jobs.map(function (j) {
+                            const btn = (j.status === 'running') ? ' <button type="button" data-job="' + (j.id || '') + '" class="jpCancel">Cancel</button>' : '';
+                            return '<div>' + (j.item_name || j.id || 'Job') + ': ' + (j.status || '') + ' (' + (j.completed || 0) + '/' + (j.total_segments || 0) + ')' + btn + '</div>';
+                        }).join('');
+                        container.querySelectorAll('.jpCancel').forEach(function (b) {
+                            b.onclick = function () {
+                                ApiClient.ajax({
+                                    type: 'POST',
+                                    url: ApiClient.getUrl('JellyProxy/Preseed/Cancel'),
+                                    data: JSON.stringify({ id: b.dataset.job }),
+                                    contentType: 'application/json'
+                                }).then(JellyProxyConfig.loadPreseedJobs);
+                            };
+                        });
+                    }).catch(function () {});
                 },
                 startPreseed: function () {
                     const value = document.querySelector('#txtPreseedItem').value.trim();
                     if (!value) return;
                     const isUrl = value.startsWith('/') || value.startsWith('http') || value.includes('.m3u8');
                     const payload = isUrl ? { streamUrl: value } : { itemId: value, streamUrl: '/Videos/' + value + '/main.m3u8' };
-                    ApiClient.ajax({type:'POST',url:ApiClient.getUrl('JellyProxy/Preseed/Start'),data:JSON.stringify(payload),contentType:'application/json'}).then(() => { document.querySelector('#preseedStatus').innerText='Started'; JellyProxyConfig.loadPreseedJobs(); });
+                    ApiClient.ajax({ type: 'POST', url: ApiClient.getUrl('JellyProxy/Preseed/Start'), data: JSON.stringify(payload), contentType: 'application/json' }).then(function () {
+                        document.querySelector('#preseedStatus').innerText = 'Started';
+                        JellyProxyConfig.loadPreseedJobs();
+                    });
                 }
             };
 
-            document.querySelector('#JellyProxyConfigPage').addEventListener('pageshow', function () {
+            var jpPreseedInterval = null;
+            var jpAbrInterval = null;
+
+            function initJellyProxyView() {
                 JellyProxyConfig.loadConfiguration();
                 JellyProxyConfig.loadPreseedJobs();
                 JellyProxyConfig.loadAbrStatus();
-                setInterval(JellyProxyConfig.loadPreseedJobs, 5000);
-                setInterval(JellyProxyConfig.loadAbrStatus, 10000);
-            });
-            document.querySelector('#btnStartPreseed').addEventListener('click', JellyProxyConfig.startPreseed);
+                if (!jpPreseedInterval) jpPreseedInterval = setInterval(JellyProxyConfig.loadPreseedJobs, 5000);
+                if (!jpAbrInterval) jpAbrInterval = setInterval(JellyProxyConfig.loadAbrStatus, 10000);
+            }
 
-            document.querySelector('#jellyProxyConfigForm').addEventListener('submit', JellyProxyConfig.saveConfiguration);
-            document.querySelector('#btnTestProxyConnection').addEventListener('click', JellyProxyConfig.testConnection);
-            document.querySelector('#btnRefreshStorage').addEventListener('click', JellyProxyConfig.loadStorageStats);
-            document.querySelector('#btnSaveStorageConfig').addEventListener('click', JellyProxyConfig.updateStorageConfig);
-            document.querySelector('#btnPurgeAll').addEventListener('click', function() { JellyProxyConfig.purgeCache('all'); });
-            document.querySelector('#btnPurgeImages').addEventListener('click', function() { JellyProxyConfig.purgeCache('images'); });
-            document.querySelector('#btnPurgeMedia').addEventListener('click', function() { JellyProxyConfig.purgeCache('media'); });
+            function teardownJellyProxyView() {
+                if (jpPreseedInterval) { clearInterval(jpPreseedInterval); jpPreseedInterval = null; }
+                if (jpAbrInterval) { clearInterval(jpAbrInterval); jpAbrInterval = null; }
+            }
+
+            const jpPage = document.querySelector('#JellyProxyConfigPage');
+            if (jpPage) {
+                jpPage.addEventListener('pageshow', initJellyProxyView);
+                jpPage.addEventListener('viewshow', initJellyProxyView);
+                jpPage.addEventListener('viewhide', teardownJellyProxyView);
+                initJellyProxyView();
+            }
+
+            const btnPreseed = document.querySelector('#btnStartPreseed');
+            if (btnPreseed) btnPreseed.addEventListener('click', JellyProxyConfig.startPreseed);
+
+            const formConfig = document.querySelector('#jellyProxyConfigForm');
+            if (formConfig) formConfig.addEventListener('submit', JellyProxyConfig.saveConfiguration);
+
+            const btnTestConn = document.querySelector('#btnTestProxyConnection');
+            if (btnTestConn) btnTestConn.addEventListener('click', JellyProxyConfig.testConnection);
+
+            const btnRefresh = document.querySelector('#btnRefreshStorage');
+            if (btnRefresh) btnRefresh.addEventListener('click', JellyProxyConfig.loadStorageStats);
+
+            const btnSaveStorage = document.querySelector('#btnSaveStorageConfig');
+            if (btnSaveStorage) btnSaveStorage.addEventListener('click', JellyProxyConfig.updateStorageConfig);
+
+            const btnPurgeAll = document.querySelector('#btnPurgeAll');
+            if (btnPurgeAll) btnPurgeAll.addEventListener('click', function() { JellyProxyConfig.purgeCache('all'); });
+
+            const btnPurgeImg = document.querySelector('#btnPurgeImages');
+            if (btnPurgeImg) btnPurgeImg.addEventListener('click', function() { JellyProxyConfig.purgeCache('images'); });
+
+            const btnPurgeMed = document.querySelector('#btnPurgeMedia');
+            if (btnPurgeMed) btnPurgeMed.addEventListener('click', function() { JellyProxyConfig.purgeCache('media'); });
         </script>
     </div>
 </body>
