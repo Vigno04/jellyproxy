@@ -10,13 +10,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jellyproxy-project/jellyproxy/proxy/internal/cache"
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/abr"
-	"github.com/jellyproxy-project/jellyproxy/proxy/internal/config"
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/auth"
+	"github.com/jellyproxy-project/jellyproxy/proxy/internal/cache"
+	"github.com/jellyproxy-project/jellyproxy/proxy/internal/config"
+	"github.com/jellyproxy-project/jellyproxy/proxy/internal/dashboard"
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/handlers"
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/playback"
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/preseed"
+	"github.com/jellyproxy-project/jellyproxy/proxy/internal/telemetry"
 )
 
 func main() {
@@ -45,15 +47,30 @@ func main() {
 		log.Fatalf("Failed to initialize reverse proxy: %v", err)
 	}
 
-	playbackTracker := playback.NewSessionTracker(cfg, storageMgr, proxyHandler.ActiveLiveUpstreamCount())
-	proxyHandler.SetSniffer(playbackTracker)
+	// Live telemetry for the dashboard: every byte the proxy sends or pulls is
+	// accounted here, so the UI can draw the client/server topology in real time.
+	hub := telemetry.NewHub(12 * time.Second)
+	names := telemetry.NewItemNames()
+	proxyHandler.SetTelemetry(hub, names)
 
-	handshakeMgr := handlers.NewHandshakeManager(cfg)
-	cacheAPI := handlers.NewCacheAPIHandler(cfg, storageMgr)
-	preseedAPI := handlers.NewPreseedAPI(cfg, preseed.NewManager(storageMgr, cfg.UpstreamURL, cfg.UpstreamHost, proxyHandler.ActiveLiveUpstreamCount()))
-	abrManager := abr.NewBandwidthManager(abr.Config{Enabled: true, UploadSpeedBps: 16_000_000})
+	// The shaper arbitrates the home upstream. Its settings come from the companion
+	// plugin and the /proxy/ website, persisted in CacheDir/settings.json.
+	abrManager := abr.NewBandwidthManager(config.DefaultABRConfig())
+	_ = config.NewSettingsStore(cfg, abrManager, storageMgr)
 	proxyHandler.SetABR(abrManager)
 	abrAPI := &handlers.ABRAPI{Manager: abrManager}
+
+	// The session tracker drives pause prefetching and seek borrowing, and feeds
+	// the shaper and telemetry with playback state.
+	sessions := playback.NewSessionTracker(cfg, storageMgr, proxyHandler.ActiveLiveUpstreamCount(), abrManager, names)
+	proxyHandler.SetSniffer(sessions)
+
+	handshakeMgr := handlers.NewHandshakeManager(cfg)
+	handshakeMgr.SetManagers(abrManager, storageMgr)
+	cacheAPI := handlers.NewCacheAPIHandler(cfg, storageMgr)
+	preseedMgr := preseed.NewManager(storageMgr, cfg.UpstreamURL, cfg.UpstreamHost)
+	preseedMgr.SetThrottle(abrManager.BackgroundWait)
+	preseedAPI := handlers.NewPreseedAPI(cfg, preseedMgr)
 
 	// Custom router multiplexer
 	mux := http.NewServeMux()
@@ -61,8 +78,8 @@ func main() {
 	// Inter-service JellyProxy API endpoints
 	mux.HandleFunc("/jellyproxy/api/status", handshakeMgr.HandleStatus)
 	mux.HandleFunc("/jellyproxy/api/handshake", handshakeMgr.HandleHandshake)
-	mux.HandleFunc("/jellyproxy/api/playback/report", auth.RequireSecret(cfg.SharedSecret, playbackTracker.HandleReport))
-	mux.HandleFunc("/jellyproxy/api/playback/sessions", auth.RequireSecret(cfg.SharedSecret, playbackTracker.HandleSessions))
+	mux.HandleFunc("/jellyproxy/api/playback/report", auth.RequireSecret(cfg.SharedSecret, sessions.HandleReport))
+	mux.HandleFunc("/jellyproxy/api/playback/sessions", auth.RequireSecret(cfg.SharedSecret, sessions.HandleSessions))
 	mux.HandleFunc("/jellyproxy/api/storage", auth.RequireSecret(cfg.SharedSecret, cacheAPI.HandleStorage))
 	mux.HandleFunc("/jellyproxy/api/config", auth.RequireSecret(cfg.SharedSecret, cacheAPI.HandleConfig))
 	mux.HandleFunc("/jellyproxy/api/cache/purge", auth.RequireSecret(cfg.SharedSecret, cacheAPI.HandlePurge))
@@ -72,10 +89,19 @@ func main() {
 	mux.HandleFunc("/jellyproxy/api/preseed/cancel", preseedAPI.Handler(preseedAPI.Cancel))
 	mux.HandleFunc("/jellyproxy/api/abr/config", auth.RequireSecret(cfg.SharedSecret, abrAPI.Config))
 	mux.HandleFunc("/jellyproxy/api/abr/status", auth.RequireSecret(cfg.SharedSecret, abrAPI.Status))
+	mux.HandleFunc("/jellyproxy/api/abr/capabilities", auth.RequireSecret(cfg.SharedSecret, abrAPI.Capabilities))
+
+	// Dashboard: probe the upstream so we never mount over a route Jellyfin already owns.
+	dash := dashboard.New(cfg, dashboard.Options{
+		ABR: abrManager, Storage: storageMgr, Hub: hub, Names: names,
+		Sessions: sessions, Jobs: preseedMgr, Status: handshakeMgr,
+	})
+	if uiPath := dashboard.ResolveBasePath(cfg); uiPath != "" {
+		dash.Mount(mux, uiPath)
+	}
 
 	// Catch-all: forward all standard Jellyfin traffic to upstream (with caching)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Keep internal API isolated
 		if strings.HasPrefix(r.URL.Path, "/jellyproxy/api/") {
 			http.NotFound(w, r)
 			return

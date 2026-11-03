@@ -65,3 +65,28 @@ JellyProxy solves this by establishing a high-performance **Edge Caching, Stream
 | **Phase 2** | Media Engine | HLS fMP4 chunk caching, Range slice multiplexing, audio/video track splitting. |
 | **Phase 3** | ABR & Shaper | Dynamic bandwidth allocation, buffer-aware bursting, pause prefetching. |
 | **Phase 4** | Watch Parties | SyncPlay single-pull optimization, Movie Night pre-seeding pipeline. |
+
+
+---
+
+## 5. Bandwidth Policy (how the spec cases are implemented)
+
+| Case | Behaviour | Where |
+| :--- | :--- | :--- |
+| 1 | Demands that fit in X are all satisfied (work-conserving max-min fairness). | `abr.reallocate` |
+| 2 | A request above X is capped to X (`maxStreamingBitrate` rewritten in `PlaybackInfo`, variants above the ceiling removed from `master.m3u8`). | `handlers/playbackinfo.go` |
+| 3, 6 | Over-subscription is taken from the greedy stream first; equal demands split evenly. | `abr.reallocate` |
+| 4 | Same title + same codec/audio/subtitle signature = one pipe, one upstream pull. | `abr.Signature` |
+| 5 | A different audio language is a different signature, so both pipes degrade to X/2. Muxing one video + two audios is **not** implemented. | `abr.Signature` |
+| 7 | Clients converge on one codec; fairness is charged per quality unit (h264 1.0, hevc 0.65, av1 0.55), so the better codec uses fewer real Mb/s. | `abr/codec.go` |
+| 8 | A cold pipe gets 90% of X for 10s (fast-start). | `abr.computePullsLocked` |
+| 9 | Segments are cached by session-independent key; a later viewer reads them from the VPS at zero upload. | `cache.BuildKey` |
+| 10 | `Encode` subtitle profiles for text formats are removed and WebVTT is offered as external, so Jellyfin converts ASS/SSA/SRT. Image subtitles (PGS) still burn in and get a private pipe. | `handlers/playbackinfo.go` |
+| 11 | Prefetch and pre-seed use `BackgroundWait`: whole link when idle, 5% of X while anyone plays. | `abr.BackgroundWait` |
+| 12 | A `seek` report grants the seeking pipe a 4s burst. | `playback.HandleReport` |
+
+## 6. Dashboard & Configuration
+
+`https://<domain>/proxy/` serves the live connection schema, statistics, and runtime configuration panel (authenticated with `SHARED_SECRET`). At startup the proxy probes the upstream and only mounts the UI on a path Jellyfin answers 404 for (falling back to `/jellyproxy`).
+
+All operational settings (upload speed, headroom, policy, min bitrate, single-client ceiling, fast-start burst, seek borrow, background prefetch floor, supported encoders, and cache storage quota) are configured via either the **Jellyfin companion plugin** or the **`/proxy/` web dashboard**, and are persisted to `CACHE_DIR/settings.json`.

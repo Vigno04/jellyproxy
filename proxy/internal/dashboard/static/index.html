@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JellyProxy</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>JellyProxy</h1>
+  <nav>
+    <button class="tab active" data-tab="live">Live</button>
+    <button class="tab" data-tab="stats">Stats</button>
+    <button class="tab" data-tab="settings">Settings</button>
+  </nav>
+  <span id="conn" class="pill">connecting…</span>
+  <form method="post" action="logout">
+    <input type="hidden" name="csrf_token" id="csrf-logout" value="">
+    <button class="link" type="submit">Sign out</button>
+  </form>
+</header>
+
+<main>
+  <section id="tab-live">
+    <div class="kpis" id="kpis-live"></div>
+    <div class="card">
+      <svg id="schema" viewBox="0 0 1000 360" role="img" aria-label="Live connection schema"></svg>
+    </div>
+    <div class="card"><h2>Titles</h2><div id="legend" class="legend"></div></div>
+  </section>
+
+  <section id="tab-stats" hidden>
+    <div class="kpis" id="kpis-stats"></div>
+    <div class="card"><h2>Bandwidth pipes</h2><div id="pipes" class="table-wrap"></div></div>
+    <div class="card"><h2>Sessions</h2><div id="sessions" class="table-wrap"></div></div>
+    <div class="card"><h2>Cache</h2><div id="cache"></div></div>
+    <div class="card"><h2>Pre-seed jobs</h2><div id="jobs" class="table-wrap"></div></div>
+  </section>
+
+  <section id="tab-settings" hidden>
+    <form id="settings-form" class="card">
+      <h2>Adaptive Bandwidth Shaper (ABR)</h2>
+      <div class="form-grid">
+        <label class="check-row">
+          <input type="checkbox" id="cfg-enabled">
+          <span>Enable Adaptive Bandwidth Orchestration</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="cfg-degrade">
+          <span>Allow Degrading Existing Streams</span>
+        </label>
+        <label class="field">
+          <span>Home Upload Speed (Mbps)</span>
+          <input type="number" id="cfg-upload" min="1" step="0.5" required>
+        </label>
+        <label class="field">
+          <span>Headroom (%)</span>
+          <input type="number" id="cfg-headroom" min="0" max="90" step="1" required>
+        </label>
+        <label class="field">
+          <span>Allocation Policy</span>
+          <select id="cfg-policy">
+            <option value="FairShare">Fair Share (Quality-Weighted)</option>
+            <option value="FirstComeFirstServed">First-Come First-Served</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Minimum Bitrate Floor (Mbps)</span>
+          <input type="number" id="cfg-min" min="0.5" step="0.5" required>
+        </label>
+        <label class="field">
+          <span>Single Client Ceiling (Mbps, 0 = unlimited)</span>
+          <input type="number" id="cfg-ceiling" min="0" step="0.5" required>
+        </label>
+        <label class="field">
+          <span>Fast-Start Burst Duration (s)</span>
+          <input type="number" id="cfg-fast-sec" min="1" max="60" step="1" required>
+        </label>
+        <label class="field">
+          <span>Fast-Start Link Share (%)</span>
+          <input type="number" id="cfg-fast-pct" min="10" max="99" step="1" required>
+        </label>
+        <label class="field">
+          <span>Seek Borrow Duration (s)</span>
+          <input type="number" id="cfg-seek-sec" min="1" max="30" step="1" required>
+        </label>
+        <label class="field">
+          <span>Background Prefetch Floor (%)</span>
+          <input type="number" id="cfg-bg-pct" min="1" max="50" step="1" required>
+        </label>
+        <label class="field">
+          <span>Supported Video Encoders (comma-separated)</span>
+          <input type="text" id="cfg-encoders" placeholder="h264,hevc,av1">
+        </label>
+      </div>
+
+      <h2 class="section-gap">Storage Quota</h2>
+      <div class="form-grid">
+        <label class="field">
+          <span>Maximum Cache Storage Quota (GB)</span>
+          <input type="number" id="cfg-storage-gb" min="1" step="0.5" required>
+        </label>
+      </div>
+
+      <div class="actions-row">
+        <button type="submit" class="primary">Save Settings</button>
+        <span id="settings-msg" class="muted"></span>
+      </div>
+    </form>
+
+    <div class="card">
+      <h2>Cache Purge</h2>
+      <div class="actions-row">
+        <button type="button" data-purge="all" class="danger">Purge All Cache</button>
+        <button type="button" data-purge="media">Purge Media Segments</button>
+        <button type="button" data-purge="images">Purge Images</button>
+        <button type="button" data-purge="static">Purge Static Assets</button>
+        <span id="purge-msg" class="muted"></span>
+      </div>
+    </div>
+
+    <form id="preseed-form" class="card">
+      <h2>Movie Night Pre-seeding</h2>
+      <div class="form-grid">
+        <label class="field">
+          <span>Title / Label</span>
+          <input type="text" id="preseed-name" placeholder="Inception (2010)">
+        </label>
+        <label class="field">
+          <span>Item ID or HLS Playlist Path</span>
+          <input type="text" id="preseed-url" placeholder="Item ID or /Videos/.../main.m3u8" required>
+        </label>
+      </div>
+      <div class="actions-row">
+        <button type="submit">Start Pre-seeding</button>
+        <span id="preseed-msg" class="muted"></span>
+      </div>
+    </form>
+  </section>
+</main>
+<script src="app.js" defer></script>
+</body>
+</html>

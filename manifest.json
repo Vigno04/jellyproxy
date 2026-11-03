@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "0.5.2.0",
+        "version": "0.6.0.0",
         "targetAbi": "10.11.6.0",
-        "sourceUrl": "https://raw.githubusercontent.com/jellyproxy-project/jellyproxy/refs/heads/main/packages/jellyproxy-0.5.2.zip",
-        "checksum": "ba419824755e22d8cc6d49e7c224687f",
-        "timestamp": "2026-11-03T09:07:24Z",
-        "changelog": "Fix emby-checkbox span markup in ABR degrade setting and add emby-select requirement."
+        "sourceUrl": "https://raw.githubusercontent.com/jellyproxy-project/jellyproxy/refs/heads/main/packages/jellyproxy-0.6.0.zip",
+        "checksum": "123b186485a58be4e4d66834da3da09d",
+        "timestamp": "2026-11-03T15:41:09Z",
+        "changelog": "Auto-detect Jellyfin hardware encoders from encoding.xml, sync full ABR shaper config, periodic session/encoder heartbeat, and rich transcode/episode telemetry."
       }
     ]
   }

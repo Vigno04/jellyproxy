@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Concurrent;
+using System.Globalization;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Mime;
 using System.Text;
@@ -7,6 +9,9 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using JellyProxy.Configuration;
+using MediaBrowser.Controller.Configuration;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Session;
 using Microsoft.Extensions.Hosting;
@@ -21,9 +26,11 @@ namespace JellyProxy.Services;
 public class PlaybackSessionMonitor : IHostedService, IDisposable
 {
     private readonly ISessionManager _sessionManager;
+    private readonly IServerConfigurationManager _serverConfigurationManager;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<PlaybackSessionMonitor> _logger;
     private readonly ConcurrentDictionary<string, SessionStateTracker> _activeSessions = new();
+    private CancellationTokenSource? _cts;
     private bool _disposed;
 
     /// <summary>
@@ -31,10 +38,12 @@ public class PlaybackSessionMonitor : IHostedService, IDisposable
     /// </summary>
     public PlaybackSessionMonitor(
         ISessionManager sessionManager,
+        IServerConfigurationManager serverConfigurationManager,
         IHttpClientFactory httpClientFactory,
         ILogger<PlaybackSessionMonitor> logger)
     {
         _sessionManager = sessionManager;
+        _serverConfigurationManager = serverConfigurationManager;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
@@ -46,13 +55,129 @@ public class PlaybackSessionMonitor : IHostedService, IDisposable
         _sessionManager.PlaybackProgress += OnPlaybackProgress;
         _sessionManager.PlaybackStopped += OnPlaybackStopped;
         _sessionManager.SessionEnded += OnSessionEnded;
+        _cts = new CancellationTokenSource();
+        _ = PeriodicSyncLoopAsync(_cts.Token);
         _logger.LogInformation("PlaybackSessionMonitor started and subscribed to session events.");
         return Task.CompletedTask;
+    }
+
+    private async Task PeriodicSyncLoopAsync(CancellationToken token)
+    {
+        await SyncSettingsWithProxyAsync(initial: true).ConfigureAwait(false);
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(60));
+        while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
+        {
+            await SyncSettingsWithProxyAsync(initial: false).ConfigureAwait(false);
+            BroadcastActiveSessions();
+        }
+    }
+
+    private void BroadcastActiveSessions()
+    {
+        try
+        {
+            foreach (var session in _sessionManager.Sessions)
+            {
+                if (session?.NowPlayingItem == null)
+                {
+                    continue;
+                }
+                var itemId = session.NowPlayingItem.Id.ToString("N");
+                var posTicks = session.PlayState?.PositionTicks ?? 0;
+                var totalTicks = session.NowPlayingItem.RunTimeTicks;
+                var isPaused = session.PlayState?.IsPaused ?? false;
+                var playMethod = session.PlayState?.PlayMethod?.ToString();
+                var playSessionId = _activeSessions.TryGetValue(session.Id ?? string.Empty, out var tracked) ? tracked.PlaySessionId : null;
+                var itemName = FormatDisplayTitle(session.FullNowPlayingItem, session.NowPlayingItem.Name, session.NowPlayingItem.SeriesName, session.NowPlayingItem.ParentIndexNumber, session.NowPlayingItem.IndexNumber);
+                SendPlaybackReport(session, itemName, itemId, playSessionId, posTicks, totalTicks, isPaused, "progress", playMethod);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Periodic active session broadcast failed");
+        }
+    }
+
+    private async Task SyncSettingsWithProxyAsync(bool initial)
+    {
+        try
+        {
+            if (initial)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+            }
+            var config = Plugin.Instance?.Configuration;
+            if (config == null || string.IsNullOrWhiteSpace(config.ProxyUrl))
+            {
+                return;
+            }
+
+            var proxyUrl = config.ProxyUrl.TrimEnd('/');
+            var client = _httpClientFactory.CreateClient("JellyProxy");
+            client.Timeout = TimeSpan.FromSeconds(10);
+
+            var encoders = EncoderDetector.ResolveEncoders(_serverConfigurationManager, config, out _);
+
+            if (!initial)
+            {
+                var capsReq = new HttpRequestMessage(HttpMethod.Post, $"{proxyUrl}/jellyproxy/api/abr/capabilities")
+                {
+                    Content = new StringContent(JsonSerializer.Serialize(new { encoders }), Encoding.UTF8, MediaTypeNames.Application.Json)
+                };
+                if (!string.IsNullOrWhiteSpace(config.SharedSecret))
+                {
+                    capsReq.Headers.TryAddWithoutValidation("X-JellyProxy-Secret", config.SharedSecret);
+                }
+                await client.SendAsync(capsReq).ConfigureAwait(false);
+                return;
+            }
+
+            var handshakeUrl = $"{proxyUrl}/jellyproxy/api/handshake";
+            var payload = new
+            {
+                secret = config.SharedSecret,
+                server_name = _serverConfigurationManager.Configuration?.ServerName ?? "Jellyfin",
+                server_id = _serverConfigurationManager.Configuration?.ServerName ?? "Jellyfin",
+                plugin_version = "0.6.0",
+                jellyfin_version = "10.11.x",
+                max_storage_gb = config.MaxStorageGb,
+                encoders = encoders,
+                abr = new
+                {
+                    enabled = config.EnableBandwidthShaping,
+                    uploadSpeedBps = (long)config.UploadSpeedMbps * 1_000_000L,
+                    headroomPercent = config.HeadroomPercent,
+                    policy = config.ShaperPolicy,
+                    allowDegradingExistingStreams = config.AllowDegradingExisting,
+                    minBitrateBps = (long)config.MinBitrateMbps * 1_000_000L,
+                    singleClientCeilingBps = (long)config.SingleClientCeilingMbps * 1_000_000L,
+                    fastStartSeconds = config.FastStartSeconds,
+                    fastStartSharePercent = config.FastStartSharePercent,
+                    seekBorrowSeconds = config.SeekBorrowSeconds,
+                    backgroundFloorPercent = config.BackgroundFloorPercent
+                }
+            };
+
+            var req = new HttpRequestMessage(HttpMethod.Post, handshakeUrl)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, MediaTypeNames.Application.Json)
+            };
+            if (!string.IsNullOrWhiteSpace(config.SharedSecret))
+            {
+                req.Headers.TryAddWithoutValidation("X-JellyProxy-Secret", config.SharedSecret);
+            }
+            await client.SendAsync(req).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Settings sync with JellyProxy skipped or failed");
+        }
     }
 
     /// <inheritdoc />
     public Task StopAsync(CancellationToken cancellationToken)
     {
+        _cts?.Cancel();
         Unsubscribe();
         _activeSessions.Clear();
         _logger.LogInformation("PlaybackSessionMonitor stopped and unsubscribed from session events.");
@@ -80,7 +205,8 @@ public class PlaybackSessionMonitor : IHostedService, IDisposable
             LastStateChangeTime = DateTimeOffset.UtcNow
         };
 
-        SendPlaybackReport(e.Session, e.Item?.Name, itemId, e.PlaySessionId, posTicks, e.Item?.RunTimeTicks, false, "start", e.Session.PlayState?.PlayMethod.ToString());
+        var title = FormatDisplayTitle(e.Item, e.Item?.Name, e.Session.NowPlayingItem?.SeriesName, e.Item?.ParentIndexNumber, e.Item?.IndexNumber);
+        SendPlaybackReport(e.Session, title, itemId, e.PlaySessionId, posTicks, e.Item?.RunTimeTicks, false, "start", e.Session.PlayState?.PlayMethod.ToString());
     }
 
     private void OnPlaybackProgress(object? sender, PlaybackProgressEventArgs e)
@@ -109,10 +235,9 @@ public class PlaybackSessionMonitor : IHostedService, IDisposable
         bool isPauseTransition = isPaused != state.IsPaused;
         bool isItemChange = !string.IsNullOrEmpty(itemId) && itemId != state.ItemId;
 
-        // Heuristic Seek Detection: drift between position ticks delta and elapsed wall-clock time
         long elapsedTicks = (long)(now - state.LastReportTime).TotalMilliseconds * 10000;
         long tickDelta = Math.Abs(currentTicks - state.PositionTicks);
-        bool isSeek = !isPaused && !state.IsPaused && tickDelta > (elapsedTicks + 50_000_000); // > 5s drift
+        bool isSeek = !isPaused && !state.IsPaused && tickDelta > (elapsedTicks + 50_000_000);
 
         string? eventName = null;
         if (isItemChange)
@@ -127,9 +252,8 @@ public class PlaybackSessionMonitor : IHostedService, IDisposable
         {
             eventName = "seek";
         }
-        else if (now - state.LastReportTime >= TimeSpan.FromSeconds(20))
+        else if (now - state.LastReportTime >= TimeSpan.FromSeconds(15))
         {
-            // Heartbeat report every 20 seconds
             eventName = "progress";
         }
 
@@ -145,7 +269,8 @@ public class PlaybackSessionMonitor : IHostedService, IDisposable
                 state.LastStateChangeTime = now;
             }
 
-            SendPlaybackReport(e.Session, e.Item?.Name, itemId, e.PlaySessionId, currentTicks, e.Item?.RunTimeTicks, isPaused, eventName, e.Session.PlayState?.PlayMethod.ToString());
+            var title = FormatDisplayTitle(e.Item, e.Item?.Name, e.Session.NowPlayingItem?.SeriesName, e.Item?.ParentIndexNumber, e.Item?.IndexNumber);
+            SendPlaybackReport(e.Session, title, itemId, e.PlaySessionId, currentTicks, e.Item?.RunTimeTicks, isPaused, eventName, e.Session.PlayState?.PlayMethod.ToString());
         }
     }
 
@@ -161,8 +286,9 @@ public class PlaybackSessionMonitor : IHostedService, IDisposable
 
         var itemId = e.Item?.Id.ToString("N") ?? string.Empty;
         var posTicks = e.PlaybackPositionTicks ?? 0;
+        var title = FormatDisplayTitle(e.Item, e.Item?.Name, e.Session.NowPlayingItem?.SeriesName, e.Item?.ParentIndexNumber, e.Item?.IndexNumber);
 
-        SendPlaybackReport(e.Session, e.Item?.Name, itemId, e.PlaySessionId, posTicks, e.Item?.RunTimeTicks, false, "stop", e.Session.PlayState?.PlayMethod.ToString());
+        SendPlaybackReport(e.Session, title, itemId, e.PlaySessionId, posTicks, e.Item?.RunTimeTicks, false, "stop", e.Session.PlayState?.PlayMethod.ToString());
     }
 
     private void OnSessionEnded(object? sender, SessionEventArgs e)
@@ -177,6 +303,25 @@ public class PlaybackSessionMonitor : IHostedService, IDisposable
         {
             SendPlaybackReport(e.SessionInfo, null, state.ItemId, state.PlaySessionId, state.PositionTicks, null, false, "stop", null);
         }
+    }
+
+    private static string? FormatDisplayTitle(BaseItem? item, string? name, string? seriesName, int? season, int? episode)
+    {
+        if (item is Episode ep)
+        {
+            seriesName ??= ep.SeriesName;
+            season ??= ep.ParentIndexNumber;
+            episode ??= ep.IndexNumber;
+        }
+        if (!string.IsNullOrWhiteSpace(seriesName))
+        {
+            if (season.HasValue && episode.HasValue)
+            {
+                return string.Format(CultureInfo.InvariantCulture, "{0} S{1:00}E{2:00} · {3}", seriesName, season.Value, episode.Value, name ?? "Episode");
+            }
+            return $"{seriesName} · {name}";
+        }
+        return name;
     }
 
     private void SendPlaybackReport(
@@ -206,6 +351,16 @@ public class PlaybackSessionMonitor : IHostedService, IDisposable
                 var client = _httpClientFactory.CreateClient("JellyProxy");
                 client.Timeout = TimeSpan.FromSeconds(5);
 
+                var tr = session.TranscodingInfo;
+                var ps = session.PlayState;
+                var videoCodec = tr?.VideoCodec;
+                if (string.IsNullOrWhiteSpace(videoCodec))
+                {
+                    videoCodec = session.NowPlayingItem?.MediaStreams?
+                        .FirstOrDefault(s => s.Type == MediaBrowser.Model.Entities.MediaStreamType.Video)?.Codec;
+                }
+                var audioCodec = tr?.AudioCodec;
+
                 var payload = new
                 {
                     secret = config.SharedSecret,
@@ -222,7 +377,14 @@ public class PlaybackSessionMonitor : IHostedService, IDisposable
                     total_ticks = totalTicks ?? 0,
                     is_paused = isPaused,
                     event_type = eventType,
-                    play_method = playMethod ?? "DirectPlay"
+                    play_method = playMethod ?? "DirectPlay",
+                    video_codec = videoCodec ?? string.Empty,
+                    audio_codec = audioCodec ?? string.Empty,
+                    transcode_bitrate = (long)(tr?.Bitrate ?? 0),
+                    transcode_completion = tr?.CompletionPercentage ?? 0,
+                    audio_stream_index = ps?.AudioStreamIndex?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
+                    subtitle_stream_index = ps?.SubtitleStreamIndex?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
+                    media_source_id = ps?.MediaSourceId ?? string.Empty
                 };
 
                 var requestMessage = new HttpRequestMessage(HttpMethod.Post, reportUrl)
@@ -267,6 +429,8 @@ public class PlaybackSessionMonitor : IHostedService, IDisposable
             return;
         }
 
+        _cts?.Cancel();
+        _cts?.Dispose();
         Unsubscribe();
         _activeSessions.Clear();
         _disposed = true;

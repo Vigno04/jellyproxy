@@ -6,7 +6,10 @@ import (
 	"strings"
 )
 
-// Config represents runtime configuration for JellyProxy
+// Config represents bootstrap runtime configuration for JellyProxy.
+// Operational settings (bandwidth shaper, codec capabilities, cache quota) are
+// configured dynamically via the Jellyfin companion plugin and the /proxy/ website,
+// and persisted in CacheDir/settings.json.
 type Config struct {
 	Port         string
 	UpstreamURL  string
@@ -17,7 +20,7 @@ type Config struct {
 	LogLevel     string
 }
 
-// Load reads configuration from environment variables with sensible defaults
+// Load reads bootstrap configuration from environment variables with sensible defaults.
 func Load() *Config {
 	port := os.Getenv("PORT")
 	if port == "" {

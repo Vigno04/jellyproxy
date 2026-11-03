@@ -24,7 +24,7 @@ func TestSessionTrackerLifecycle(t *testing.T) {
 		UpstreamURL:  "http://upstream.local:8096",
 	}
 
-	tracker := NewSessionTracker(cfg, storage, nil)
+	tracker := NewSessionTracker(cfg, storage, nil, nil, nil)
 
 	// 1. Send Playback Start report
 	startRep := PlaybackReport{

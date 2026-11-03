@@ -1,14 +1,14 @@
 {
   "category": "General",
-  "changelog": "- Phase 2: storage management telemetry, LRU cache quota controls, cache purges, and automated library event invalidation",
+  "changelog": "- v0.6.0: automatic Jellyfin hardware encoder detection (encoding.xml), full 12-case bandwidth shaping sync, periodic session & encoder heartbeat, and rich transcode/series metadata",
   "description": "JellyProxy companion plugin for smart edge caching, bandwidth multiplexing, and prefetching.",
   "guid": "E439D5E7-789A-4E2A-A9E3-2E45DAEC9312",
   "name": "JellyProxy",
   "overview": "Smart edge reverse proxy companion plugin for Jellyfin.",
   "owner": "jellyproxy-project",
   "targetAbi": "10.11.6.0",
-  "timestamp": "2026-11-03T07:25:00Z",
-  "version": "0.5.2.0",
+  "timestamp": "2026-11-03T15:39:00Z",
+  "version": "0.6.0.0",
   "status": "Active",
   "autoUpdate": false,
   "assemblies": [
