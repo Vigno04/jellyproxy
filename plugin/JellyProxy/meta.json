@@ -7,8 +7,8 @@
   "overview": "Smart edge reverse proxy companion plugin for Jellyfin.",
   "owner": "jellyproxy-project",
   "targetAbi": "10.11.6.0",
-  "timestamp": "2026-11-03T07:15:00Z",
-  "version": "0.5.1.0",
+  "timestamp": "2026-11-03T07:25:00Z",
+  "version": "0.5.2.0",
   "status": "Active",
   "autoUpdate": false,
   "assemblies": [
