@@ -1,19 +1,26 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/Vigno04/jellyproxy/proxy/internal/config"
+	"github.com/Vigno04/jellyproxy/proxy/internal/abr"
 	"github.com/Vigno04/jellyproxy/proxy/internal/auth"
+	"github.com/Vigno04/jellyproxy/proxy/internal/cache"
+	"github.com/Vigno04/jellyproxy/proxy/internal/config"
 )
 
-// HandshakeManager tracks paired Jellyfin server state
+// HandshakeManager tracks paired Jellyfin server state and applies initial settings pushed on pair.
 type HandshakeManager struct {
 	cfg          *config.Config
+	abr          *abr.BandwidthManager
+	storage      *cache.StorageManager
 	mu           sync.RWMutex
 	paired       bool
 	lastSeen     time.Time
@@ -24,11 +31,14 @@ type HandshakeManager struct {
 
 // HandshakeRequest payload from Jellyfin companion plugin
 type HandshakeRequest struct {
-	Secret        string `json:"secret"`
-	ServerName    string `json:"server_name"`
-	ServerID      string `json:"server_id"`
-	PluginVersion string `json:"plugin_version"`
-	JellyVersion  string `json:"jellyfin_version"`
+	Secret        string      `json:"secret"`
+	ServerName    string      `json:"server_name"`
+	ServerID      string      `json:"server_id"`
+	PluginVersion string      `json:"plugin_version"`
+	JellyVersion  string      `json:"jellyfin_version"`
+	ABR           *abr.Config `json:"abr,omitempty"`
+	Encoders      []string    `json:"encoders,omitempty"`
+	MaxStorageGB  float64     `json:"max_storage_gb,omitempty"`
 }
 
 // StatusResponse payload sent back to plugin or health check
@@ -43,11 +53,35 @@ type StatusResponse struct {
 	SecretSecured bool      `json:"secret_secured"`
 }
 
+// StatusSnapshot returns the pairing state as a plain map for the dashboard.
+func (h *HandshakeManager) StatusSnapshot() map[string]any {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return map[string]any{
+		"paired":         h.paired,
+		"server_name":    h.serverName,
+		"server_id":      h.serverID,
+		"jelly_version":  h.jellyVersion,
+		"last_seen":      h.lastSeen,
+		"upstream_url":   h.cfg.UpstreamURL,
+		"secret_secured": h.cfg.SharedSecret != "",
+	}
+}
+
 // NewHandshakeManager initializes handshake tracker
 func NewHandshakeManager(cfg *config.Config) *HandshakeManager {
 	return &HandshakeManager{
 		cfg: cfg,
 	}
+}
+
+// SetManagers attaches the bandwidth shaper and cache storage manager so a plugin
+// handshake can push its saved settings in a single round-trip.
+func (h *HandshakeManager) SetManagers(abrMgr *abr.BandwidthManager, storageMgr *cache.StorageManager) {
+	h.mu.Lock()
+	h.abr = abrMgr
+	h.storage = storageMgr
+	h.mu.Unlock()
 }
 
 // HandleStatus returns JSON status of the proxy
@@ -69,7 +103,7 @@ func (h *HandshakeManager) HandleStatus(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// HandleHandshake verifies authentication with companion plugin
+// HandleHandshake verifies authentication with companion plugin and syncs settings.
 func (h *HandshakeManager) HandleHandshake(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -77,10 +111,9 @@ func (h *HandshakeManager) HandleHandshake(w http.ResponseWriter, r *http.Reques
 	}
 
 	var req HandshakeRequest
-	// Support secret via Header or JSON Body
 	secretHeader := r.Header.Get("X-JellyProxy-Secret")
 
-	if r.Header.Get("Content-Type") == "application/json" {
+	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 			return
@@ -92,16 +125,19 @@ func (h *HandshakeManager) HandleHandshake(w http.ResponseWriter, r *http.Reques
 		incomingSecret = secretHeader
 	}
 
-	// Secret validation
-	if h.cfg.SharedSecret != "" && incomingSecret != h.cfg.SharedSecret {
-		log.Printf("[JellyProxy] Handshake refused: secret mismatch from %s", r.RemoteAddr)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status":  "unauthorized",
-			"message": "Shared secret does not match configured proxy secret",
-		})
-		return
+	if h.cfg.SharedSecret != "" {
+		a := sha256.Sum256([]byte(incomingSecret))
+		b := sha256.Sum256([]byte(h.cfg.SharedSecret))
+		if subtle.ConstantTimeCompare(a[:], b[:]) != 1 {
+			log.Printf("[JellyProxy] Handshake refused: secret mismatch from %s", r.RemoteAddr)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":  "unauthorized",
+				"message": "Shared secret does not match configured proxy secret",
+			})
+			return
+		}
 	}
 
 	h.mu.Lock()
@@ -116,7 +152,23 @@ func (h *HandshakeManager) HandleHandshake(w http.ResponseWriter, r *http.Reques
 	if req.JellyVersion != "" {
 		h.jellyVersion = req.JellyVersion
 	}
+	abrMgr := h.abr
+	storageMgr := h.storage
 	h.mu.Unlock()
+
+	if abrMgr != nil {
+		if req.ABR != nil {
+			abrMgr.UpdateConfig(*req.ABR)
+		}
+		if len(req.Encoders) > 0 {
+			abrMgr.Capabilities().SetEncoders(req.Encoders)
+		}
+	}
+	if storageMgr != nil && req.MaxStorageGB > 0 {
+		if err := storageMgr.SetMaxStorageGB(req.MaxStorageGB); err == nil {
+			h.cfg.MaxStorageGB = req.MaxStorageGB
+		}
+	}
 
 	log.Printf("[JellyProxy] Handshake successful! Jellyfin '%s' (v%s, id: %s) paired at %s",
 		req.ServerName, req.JellyVersion, req.ServerID, h.lastSeen.Format(time.RFC3339))

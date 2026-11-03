@@ -78,10 +78,18 @@ type StorageManager struct {
 	baseDir         string
 	maxStorageBytes int64
 	mu              sync.RWMutex
-	entries         map[string]*Entry            // key -> Entry
+	entries         map[string]*Entry              // key -> Entry
 	itemIndex       map[string]map[string]struct{} // itemID -> set of keys
 	catStats        map[string]*CategoryStats
 	totalBytes      int64
+	onChange        func()
+}
+
+// SetOnChange registers a callback invoked whenever the storage quota changes.
+func (sm *StorageManager) SetOnChange(fn func()) {
+	sm.mu.Lock()
+	sm.onChange = fn
+	sm.mu.Unlock()
 }
 
 // NewStorageManager initializes cache directories, scans existing cached items, and enforces limits
@@ -584,11 +592,15 @@ func (sm *StorageManager) SetMaxStorageGB(gb float64) error {
 	sm.mu.Lock()
 	sm.maxStorageBytes = newMaxBytes
 	needsEvict := sm.totalBytes > sm.maxStorageBytes
+	cb := sm.onChange
 	sm.mu.Unlock()
 
 	log.Printf("[Cache] Updated max storage limit to %.2f GB (%d bytes)", gb, newMaxBytes)
 	if needsEvict {
 		sm.EvictLRU()
+	}
+	if cb != nil {
+		cb()
 	}
 	return nil
 }

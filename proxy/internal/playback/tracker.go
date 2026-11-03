@@ -10,51 +10,68 @@ import (
 	"path"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
+	"github.com/Vigno04/jellyproxy/proxy/internal/abr"
+	"github.com/Vigno04/jellyproxy/proxy/internal/auth"
 	"github.com/Vigno04/jellyproxy/proxy/internal/cache"
 	"github.com/Vigno04/jellyproxy/proxy/internal/config"
-	"github.com/Vigno04/jellyproxy/proxy/internal/auth"
+	"github.com/Vigno04/jellyproxy/proxy/internal/telemetry"
 )
 
 type PlaybackReport struct {
-	Secret        string `json:"secret"`
-	SessionID     string `json:"session_id"`
-	DeviceID      string `json:"device_id"`
-	DeviceName    string `json:"device_name"`
-	ClientName    string `json:"client_name"`
-	UserID        string `json:"user_id"`
-	UserName      string `json:"user_name"`
-	ItemID        string `json:"item_id"`
-	ItemName      string `json:"item_name"`
-	PlaySessionID string `json:"play_session_id"`
-	PositionTicks int64  `json:"position_ticks"`
-	TotalTicks    int64  `json:"total_ticks"`
-	IsPaused      bool   `json:"is_paused"`
-	EventType     string `json:"event_type"`
-	PlayMethod    string `json:"play_method"`
+	Secret              string  `json:"secret"`
+	SessionID           string  `json:"session_id"`
+	DeviceID            string  `json:"device_id"`
+	DeviceName          string  `json:"device_name"`
+	ClientName          string  `json:"client_name"`
+	UserID              string  `json:"user_id"`
+	UserName            string  `json:"user_name"`
+	ItemID              string  `json:"item_id"`
+	ItemName            string  `json:"item_name"`
+	NextItemID          string  `json:"next_item_id,omitempty"`
+	NextItemName        string  `json:"next_item_name,omitempty"`
+	PlaySessionID       string  `json:"play_session_id"`
+	PositionTicks       int64   `json:"position_ticks"`
+	TotalTicks          int64   `json:"total_ticks"`
+	IsPaused            bool    `json:"is_paused"`
+	EventType           string  `json:"event_type"`
+	PlayMethod          string  `json:"play_method"`
+	VideoCodec          string  `json:"video_codec,omitempty"`
+	AudioCodec          string  `json:"audio_codec,omitempty"`
+	TranscodeBitrate    int64   `json:"transcode_bitrate,omitempty"`
+	TranscodeCompletion float64 `json:"transcode_completion,omitempty"`
+	AudioStreamIndex    string  `json:"audio_stream_index,omitempty"`
+	SubtitleStreamIndex string  `json:"subtitle_stream_index,omitempty"`
+	MediaSourceID       string  `json:"media_source_id,omitempty"`
 }
 
 type SessionInfo struct {
-	SessionID       string            `json:"session_id"`
-	DeviceName      string            `json:"device_name"`
-	ClientName      string            `json:"client_name"`
-	UserName        string            `json:"user_name"`
-	ItemID          string            `json:"item_id"`
-	ItemName        string            `json:"item_name"`
-	PlaySessionID   string            `json:"play_session_id"`
-	PositionTicks   int64             `json:"position_ticks"`
-	TotalTicks      int64             `json:"total_ticks"`
-	IsPaused        bool              `json:"is_paused"`
-	PlayMethod      string            `json:"play_method"`
-	LastSeen        time.Time         `json:"last_seen"`
-	PrefetchActive  bool              `json:"prefetch_active"`
-	PrefetchedCount int               `json:"prefetched_count"`
-	LastSegmentURL  string            `json:"last_segment_url,omitempty"`
-	Segments        []string          `json:"-"`
-	AuthHeaders     map[string]string `json:"-"`
-	cancelPrefetch  context.CancelFunc
+	SessionID           string            `json:"session_id"`
+	DeviceID            string            `json:"device_id"`
+	DeviceName          string            `json:"device_name"`
+	ClientName          string            `json:"client_name"`
+	UserName            string            `json:"user_name"`
+	ItemID              string            `json:"item_id"`
+	ItemName            string            `json:"item_name"`
+	NextItemID          string            `json:"next_item_id,omitempty"`
+	NextItemName        string            `json:"next_item_name,omitempty"`
+	PlaySessionID       string            `json:"play_session_id"`
+	PositionTicks       int64             `json:"position_ticks"`
+	TotalTicks          int64             `json:"total_ticks"`
+	IsPaused            bool              `json:"is_paused"`
+	PlayMethod          string            `json:"play_method"`
+	VideoCodec          string            `json:"video_codec,omitempty"`
+	AudioCodec          string            `json:"audio_codec,omitempty"`
+	TranscodeBitrate    int64             `json:"transcode_bitrate,omitempty"`
+	TranscodeCompletion float64           `json:"transcode_completion,omitempty"`
+	LastSeen            time.Time         `json:"last_seen"`
+	PrefetchActive      bool              `json:"prefetch_active"`
+	PrefetchedCount     int               `json:"prefetched_count"`
+	LastSegmentURL      string            `json:"last_segment_url,omitempty"`
+	Segments            []string          `json:"-"`
+	AuthHeaders         map[string]string `json:"-"`
+	cancelPrefetch      context.CancelFunc
 }
 
 type SessionTracker struct {
@@ -64,10 +81,12 @@ type SessionTracker struct {
 	sessions       map[string]*SessionInfo
 	playSessionMap map[string]string
 	activeLive     *int32
+	abr            *abr.BandwidthManager
+	names          *telemetry.ItemNames
 	mu             sync.RWMutex
 }
 
-func NewSessionTracker(cfg *config.Config, storage *cache.StorageManager, activeLive *int32) *SessionTracker {
+func NewSessionTracker(cfg *config.Config, storage *cache.StorageManager, activeLive *int32, shaper *abr.BandwidthManager, names *telemetry.ItemNames) *SessionTracker {
 	transport := &http.Transport{
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		MaxIdleConns:        50,
@@ -82,6 +101,8 @@ func NewSessionTracker(cfg *config.Config, storage *cache.StorageManager, active
 		sessions:       make(map[string]*SessionInfo),
 		playSessionMap: make(map[string]string),
 		activeLive:     activeLive,
+		abr:            shaper,
+		names:          names,
 	}
 
 	go st.cleanupLoop()
@@ -215,8 +236,13 @@ func (st *SessionTracker) HandleReport(w http.ResponseWriter, r *http.Request) {
 
 	if st.cfg.SharedSecret != "" && !auth.IsAuthorized(r, st.cfg.SharedSecret) {
 		secret := rep.Secret
-		if secret == "" { secret = r.Header.Get("X-JellyProxy-Secret") }
-		if secret != st.cfg.SharedSecret { http.Error(w, "Unauthorized", http.StatusUnauthorized); return }
+		if secret == "" {
+			secret = r.Header.Get("X-JellyProxy-Secret")
+		}
+		if secret != st.cfg.SharedSecret {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	st.mu.Lock()
@@ -228,20 +254,42 @@ func (st *SessionTracker) HandleReport(w http.ResponseWriter, r *http.Request) {
 		st.sessions[rep.SessionID] = sess
 	}
 
+	sess.DeviceID = rep.DeviceID
 	sess.DeviceName = rep.DeviceName
 	sess.ClientName = rep.ClientName
 	sess.UserName = rep.UserName
 	sess.ItemID = rep.ItemID
 	sess.ItemName = rep.ItemName
+	sess.NextItemID = rep.NextItemID
+	sess.NextItemName = rep.NextItemName
 	sess.PlaySessionID = rep.PlaySessionID
 	sess.PositionTicks = rep.PositionTicks
 	sess.TotalTicks = rep.TotalTicks
 	sess.IsPaused = rep.IsPaused
 	sess.PlayMethod = rep.PlayMethod
+	sess.VideoCodec = rep.VideoCodec
+	sess.AudioCodec = rep.AudioCodec
+	sess.TranscodeBitrate = rep.TranscodeBitrate
+	sess.TranscodeCompletion = rep.TranscodeCompletion
 	sess.LastSeen = time.Now()
 
 	if rep.PlaySessionID != "" {
 		st.playSessionMap[rep.PlaySessionID] = rep.SessionID
+	}
+	st.names.Set(rep.ItemID, rep.ItemName)
+	if rep.NextItemID != "" && rep.NextItemName != "" {
+		st.names.Set(rep.NextItemID, rep.NextItemName)
+	}
+	if st.abr != nil && rep.DeviceID != "" {
+		switch {
+		case rep.EventType == "stop":
+			st.abr.Release(rep.DeviceID)
+		case rep.EventType == "seek":
+			// Spec case 12: the seeking client's buffer is gone, lend it bandwidth.
+			st.abr.Seek(rep.DeviceID)
+		case rep.ItemID != "":
+			st.abr.Touch(rep.DeviceID, rep.ItemID)
+		}
 	}
 
 	if rep.EventType == "stop" {
@@ -324,14 +372,6 @@ func (st *SessionTracker) runPrefetch(sessionID string, ctx context.Context) {
 			return
 		}
 
-		// Circuit breaker: yield if active real-time live streams are downloading
-		if st.activeLive != nil && atomic.LoadInt32(st.activeLive) > 0 {
-			time.Sleep(500 * time.Millisecond)
-			if ctx.Err() != nil {
-				return
-			}
-		}
-
 		segURL := segments[i]
 		keyHash := cache.HashKey(cache.BuildKey(cache.CategoryMedia, segURL))
 		if st.storage.Has(keyHash) {
@@ -358,7 +398,12 @@ func (st *SessionTracker) runPrefetch(sessionID string, ctx context.Context) {
 			tmp, err := st.storage.CreateTempFile()
 			if err == nil {
 				tmpPath := tmp.Name()
-				_, copyErr := io.Copy(tmp, resp.Body)
+				// Spec case 11: prefetch yields to live playback via the background budget.
+				var wait abr.WaitFunc
+				if st.abr != nil {
+					wait = st.abr.BackgroundWait
+				}
+				_, copyErr := io.Copy(tmp, abr.PacedReader(ctx, resp.Body, wait))
 				_ = tmp.Close()
 				_ = resp.Body.Close()
 
@@ -396,7 +441,10 @@ func (st *SessionTracker) runPrefetch(sessionID string, ctx context.Context) {
 }
 
 func (st *SessionTracker) HandleSessions(w http.ResponseWriter, r *http.Request) {
-	if !auth.IsAuthorized(r, st.cfg.SharedSecret) { http.Error(w, "Unauthorized", http.StatusUnauthorized); return }
+	if !auth.IsAuthorized(r, st.cfg.SharedSecret) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 	st.mu.RLock()
 	list := make([]*SessionInfo, 0, len(st.sessions))
 	for _, sess := range st.sessions {
@@ -406,4 +454,22 @@ func (st *SessionTracker) HandleSessions(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(list)
+}
+
+// Snapshot returns a copy of the live sessions for the dashboard.
+func (st *SessionTracker) Snapshot() []SessionInfo {
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	out := make([]SessionInfo, 0, len(st.sessions))
+	for _, s := range st.sessions {
+		out = append(out, SessionInfo{
+			SessionID: s.SessionID, DeviceID: s.DeviceID, DeviceName: s.DeviceName, ClientName: s.ClientName,
+			UserName: s.UserName, ItemID: s.ItemID, ItemName: s.ItemName, NextItemID: s.NextItemID,
+			NextItemName: s.NextItemName, PositionTicks: s.PositionTicks, TotalTicks: s.TotalTicks,
+			IsPaused: s.IsPaused, PlayMethod: s.PlayMethod, VideoCodec: s.VideoCodec, AudioCodec: s.AudioCodec,
+			TranscodeBitrate: s.TranscodeBitrate, TranscodeCompletion: s.TranscodeCompletion,
+			LastSeen: s.LastSeen, PrefetchActive: s.PrefetchActive, PrefetchedCount: s.PrefetchedCount,
+		})
+	}
+	return out
 }

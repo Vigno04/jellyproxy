@@ -1,10 +1,12 @@
 using System;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Mime;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using JellyProxy.Configuration;
+using JellyProxy.Services;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -67,13 +69,32 @@ public class JellyProxyController : ControllerBase
             var client = _httpClientFactory.CreateClient("JellyProxy");
             client.Timeout = TimeSpan.FromSeconds(10);
 
+            var encoders = EncoderDetector.ResolveEncoders(_serverConfigurationManager, config, out var hwAccel);
+
             var payload = new
             {
                 secret = secret,
                 server_name = _serverConfigurationManager.Configuration.ServerName,
-                server_id = _serverConfigurationManager.Configuration.ServerName, // Or system ID
-                plugin_version = "0.1.0",
-                jellyfin_version = "10.10.x"
+                server_id = _serverConfigurationManager.Configuration.ServerName,
+                plugin_version = "0.6.0",
+                jellyfin_version = "10.11.x",
+                hw_accel = hwAccel,
+                max_storage_gb = config.MaxStorageGb,
+                encoders = encoders,
+                abr = new
+                {
+                    enabled = config.EnableBandwidthShaping,
+                    uploadSpeedBps = (long)config.UploadSpeedMbps * 1_000_000L,
+                    headroomPercent = config.HeadroomPercent,
+                    policy = config.ShaperPolicy,
+                    allowDegradingExistingStreams = config.AllowDegradingExisting,
+                    minBitrateBps = (long)config.MinBitrateMbps * 1_000_000L,
+                    singleClientCeilingBps = (long)config.SingleClientCeilingMbps * 1_000_000L,
+                    fastStartSeconds = config.FastStartSeconds,
+                    fastStartSharePercent = config.FastStartSharePercent,
+                    seekBorrowSeconds = config.SeekBorrowSeconds,
+                    backgroundFloorPercent = config.BackgroundFloorPercent
+                }
             };
 
             var requestMessage = new HttpRequestMessage(HttpMethod.Post, handshakeUrl)
@@ -164,13 +185,30 @@ public class JellyProxyController : ControllerBase
     }
 
     /// <summary>
-    /// Fetches storage usage statistics from JellyProxy.
+    /// Relays ABR status, config, and encoder capability requests to JellyProxy.
     /// </summary>
     [HttpGet("Abr/Status")]
     public async Task<ActionResult> GetAbrStatus() => await RelayAbr(HttpMethod.Get, "status", null);
 
+    [HttpGet("Abr/Config")]
+    public async Task<ActionResult> GetAbrConfig() => await RelayAbr(HttpMethod.Get, "config", null);
+
     [HttpPost("Abr/Config")]
     public async Task<ActionResult> UpdateAbrConfig([FromBody] object request) => await RelayAbr(HttpMethod.Post, "config", request);
+
+    [HttpGet("Abr/Capabilities")]
+    public async Task<ActionResult> GetAbrCapabilities() => await RelayAbr(HttpMethod.Get, "capabilities", null);
+
+    [HttpGet("DetectedEncoders")]
+    public ActionResult<object> GetDetectedEncoders()
+    {
+        var config = Plugin.Instance?.Configuration ?? new PluginConfiguration();
+        var encoders = EncoderDetector.ResolveEncoders(_serverConfigurationManager, config, out var hwAccel);
+        return Ok(new { encoders, hw_accel = hwAccel });
+    }
+
+    [HttpPost("Abr/Capabilities")]
+    public async Task<ActionResult> UpdateAbrCapabilities([FromBody] object request) => await RelayAbr(HttpMethod.Post, "capabilities", request);
 
     private async Task<ActionResult> RelayAbr(HttpMethod method, string operation, object? payload)
     {
@@ -204,10 +242,6 @@ public class JellyProxyController : ControllerBase
 
         var proxyUrl = config.ProxyUrl.TrimEnd('/');
         var storageUrl = $"{proxyUrl}/jellyproxy/api/storage";
-        if (!string.IsNullOrWhiteSpace(config.SharedSecret))
-        {
-            storageUrl += $"?secret={Uri.EscapeDataString(config.SharedSecret)}";
-        }
 
         try
         {

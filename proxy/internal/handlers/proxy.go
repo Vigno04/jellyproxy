@@ -1,41 +1,26 @@
 package handlers
 
 import (
-	"bytes"
+	"context"
 	"crypto/tls"
-	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/Vigno04/jellyproxy/proxy/internal/abr"
 	"github.com/Vigno04/jellyproxy/proxy/internal/cache"
 	"github.com/Vigno04/jellyproxy/proxy/internal/config"
-	"github.com/Vigno04/jellyproxy/proxy/internal/abr"
+	"github.com/Vigno04/jellyproxy/proxy/internal/telemetry"
 )
 
-var staticCacheExtensions = []string{
-	".js", ".css", ".woff", ".woff2", ".svg", ".png", ".jpg", ".ico",
-}
-
-var mediaSegmentExtensions = []string{
-	".m4s", ".ts", ".mp4", ".m4a", ".aac", ".vtt", ".bif",
-}
-
-var cachedResponseHeaders = []string{
-	"Content-Type",
-	"Cache-Control",
-	"ETag",
-	"Last-Modified",
-	"Expires",
-	"Vary",
-	"Content-Encoding",
-}
+// streamChunk is the unit in which upstream bytes are paced and accounted.
+const streamChunk = 32 * 1024
 
 // PlaylistSniffer is implemented by playback.SessionTracker to passively intercept HLS playlists and requests
 type PlaylistSniffer interface {
@@ -45,26 +30,32 @@ type PlaylistSniffer interface {
 
 // ReverseProxyHandler forwards traffic transparently to upstream Jellyfin with edge caching for images and static assets
 type ReverseProxyHandler struct {
-	cfg                    *config.Config
-	proxy                  *httputil.ReverseProxy
-	upstreamURL            *url.URL
-	httpClient             *http.Client
-	storage                *cache.StorageManager
-	sniffer                PlaylistSniffer
+	cfg                     *config.Config
+	proxy                   *httputil.ReverseProxy
+	upstreamURL             *url.URL
+	httpClient              *http.Client
+	storage                 *cache.StorageManager
+	sniffer                 PlaylistSniffer
 	activeLiveUpstreamCount int32
-	coalescer              *cache.Coalescer
-	abr                    *abr.BandwidthManager
+	coalescer               *cache.Coalescer
+	abr                     *abr.BandwidthManager
+	hub                     *telemetry.Hub
+	names                   *telemetry.ItemNames
 }
 
 // SetSniffer sets the active playlist sniffer and segment tracker
-func (h *ReverseProxyHandler) SetSniffer(s PlaylistSniffer) {
-	h.sniffer = s
+func (h *ReverseProxyHandler) SetSniffer(s PlaylistSniffer) { h.sniffer = s }
+
+// SetABR assigns the shared bandwidth shaper.
+func (h *ReverseProxyHandler) SetABR(m *abr.BandwidthManager) { h.abr = m }
+
+// SetTelemetry assigns the live traffic hub feeding the dashboard.
+func (h *ReverseProxyHandler) SetTelemetry(hub *telemetry.Hub, names *telemetry.ItemNames) {
+	h.hub, h.names = hub, names
 }
 
 // ActiveLiveUpstreamCount returns a pointer to the active live upstream downloads counter
-func (h *ReverseProxyHandler) ActiveLiveUpstreamCount() *int32 {
-	return &h.activeLiveUpstreamCount
-}
+func (h *ReverseProxyHandler) ActiveLiveUpstreamCount() *int32 { return &h.activeLiveUpstreamCount }
 
 // NewReverseProxyHandler creates an httputil reverse proxy instance integrated with StorageManager
 func NewReverseProxyHandler(cfg *config.Config, storage *cache.StorageManager) (*ReverseProxyHandler, error) {
@@ -74,6 +65,7 @@ func NewReverseProxyHandler(cfg *config.Config, storage *cache.StorageManager) (
 	}
 
 	transport := &http.Transport{
+		// The upstream is reached over a private tunnel with a self-signed certificate.
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 32,
@@ -92,11 +84,10 @@ func NewReverseProxyHandler(cfg *config.Config, storage *cache.StorageManager) (
 			req.Host = target.Host
 		}
 
-		// Set proxy headers
-		if clientIP := req.Header.Get("X-Forwarded-For"); clientIP == "" {
+		if req.Header.Get("X-Forwarded-For") == "" {
 			req.Header.Set("X-Forwarded-For", req.RemoteAddr)
 		}
-		if proto := req.Header.Get("X-Forwarded-Proto"); proto == "" {
+		if req.Header.Get("X-Forwarded-Proto") == "" {
 			if req.TLS != nil {
 				req.Header.Set("X-Forwarded-Proto", "https")
 			} else {
@@ -126,15 +117,9 @@ func NewReverseProxyHandler(cfg *config.Config, storage *cache.StorageManager) (
 				return http.ErrUseLastResponse
 			},
 		},
-		storage: storage,
+		storage:   storage,
 		coalescer: cache.NewCoalescer(),
-		abr: abr.NewBandwidthManager(abr.Config{Enabled: true, UploadSpeedBps: 16_000_000}),
 	}, nil
-}
-
-// SetABR assigns a shared BandwidthManager to the reverse proxy handler
-func (h *ReverseProxyHandler) SetABR(m *abr.BandwidthManager) {
-	h.abr = m
 }
 
 // ServeHTTP inspects requests for cache eligibility and either serves from cache, tees from upstream, or passes through
@@ -143,23 +128,76 @@ func (h *ReverseProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		h.servePlaybackInfo(w, r)
 		return
 	}
-	if h.storage != nil && r.Method == http.MethodGet && !isWebSocket(reqOrNil(r)) {
-		if category, itemID, cacheable := classifyCacheableRequest(r.URL.Path); cacheable {
-			if category == cache.CategoryMedia && h.sniffer != nil {
-				h.sniffer.OnSegmentRequested(r.URL.RequestURI(), r.Header)
+
+	if r.Method == http.MethodGet && !isWebSocket(r) {
+		if h.storage != nil {
+			if category, itemID, cacheable := classifyCacheableRequest(r.URL.Path); cacheable {
+				if category == cache.CategoryMedia {
+					h.noteMediaRequest(r, itemID)
+				}
+				h.serveCachedOrFetch(w, r, category, itemID)
+				return
 			}
-			h.serveCachedOrFetch(w, r, category, itemID)
-			return
+
+			// Intercept HLS playlists (.m3u8) to sniff upcoming media segments for prefetch
+			if strings.HasSuffix(strings.ToLower(r.URL.Path), ".m3u8") && h.sniffer != nil {
+				h.capturePlaylist(w, r)
+				return
+			}
 		}
 
-		// Intercept HLS playlists (.m3u8) to sniff upcoming media segments for prefetch
-		if strings.HasSuffix(strings.ToLower(r.URL.Path), ".m3u8") && h.sniffer != nil {
-			h.capturePlaylist(w, r)
+		if isDirectStream(r.URL.Path) {
+			h.serveDirectStream(w, r)
 			return
 		}
 	}
 
 	h.proxy.ServeHTTP(w, r)
+}
+
+// noteMediaRequest keeps the client's pipe alive and tells the tracker playback is live.
+func (h *ReverseProxyHandler) noteMediaRequest(r *http.Request, itemID string) {
+	if h.sniffer != nil {
+		h.sniffer.OnSegmentRequested(r.URL.RequestURI(), r.Header)
+	}
+	if h.abr != nil {
+		clientID, _ := clientIdentity(r)
+		h.abr.Touch(clientID, itemID)
+	}
+}
+
+// serveDirectStream relays a whole-file stream (direct play) while pacing it to the
+// shaper's share of the home upload and recording it for the dashboard.
+func (h *ReverseProxyHandler) serveDirectStream(w http.ResponseWriter, r *http.Request) {
+	itemID := extractItemIDFromMediaPath(r.URL.Path)
+	clientID, clientName := clientIdentity(r)
+	h.noteMediaRequest(r, itemID)
+
+	var fetch *abr.Fetch
+	if h.abr != nil {
+		fetch = h.abr.BeginFetchMode(clientID, itemID, true)
+		defer fetch.End()
+	}
+	atomic.AddInt32(&h.activeLiveUpstreamCount, 1)
+	defer atomic.AddInt32(&h.activeLiveUpstreamCount, -1)
+
+	ctx := r.Context()
+	mw := &meteredWriter{ResponseWriter: w, onWrite: func(n int) {
+		h.paceAndCount(ctx, fetch, itemID, n)
+		h.hub.Sent(clientID, clientName, itemID, n, false)
+	}}
+	h.proxy.ServeHTTP(mw, r)
+}
+
+// paceAndCount charges n upstream bytes against the fetch's throughput share, blocking
+// when the stream is running ahead of it, and records them as pulled from home.
+func (h *ReverseProxyHandler) paceAndCount(ctx context.Context, fetch *abr.Fetch, itemID string, n int) {
+	if fetch != nil {
+		fetch.UpdateRate()
+		_ = fetch.Wait(ctx, n)
+		fetch.Account(n)
+	}
+	h.hub.Pulled(itemID, n)
 }
 
 func (h *ReverseProxyHandler) capturePlaylist(w http.ResponseWriter, r *http.Request) {
@@ -187,6 +225,9 @@ func (h *ReverseProxyHandler) capturePlaylist(w http.ResponseWriter, r *http.Req
 	}
 
 	for k, vals := range resp.Header {
+		if strings.EqualFold(k, "Content-Length") {
+			continue // body may have been rewritten
+		}
 		for _, v := range vals {
 			w.Header().Add(k, v)
 		}
@@ -199,184 +240,14 @@ func (h *ReverseProxyHandler) capturePlaylist(w http.ResponseWriter, r *http.Req
 	}
 }
 
-func (h *ReverseProxyHandler) filterMasterPlaylist(r *http.Request, body []byte) []byte {
-	client := r.URL.Query().Get("DeviceId")
-	if client == "" { client = r.URL.Query().Get("PlaySessionId") }
-	if client == "" { client = r.RemoteAddr }
-	status := h.abr.GetStatus()
-	var clientAlloc int64
-	for _, p := range status.Pipes {
-		if p.AllocatedBps > 0 { clientAlloc = p.AllocatedBps; break }
-	}
-	if clientAlloc <= 0 { return body }
-
-	lines := strings.Split(string(body), "\n")
-	type variant struct {
-		inf  string
-		url  string
-		bw   int64
-	}
-	var variants []variant
-	var otherLines []string
-	var minBw int64 = 1<<62 - 1
-
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#EXT-X-STREAM-INF:") {
-			var bw int64
-			for _, part := range strings.Split(strings.TrimPrefix(trimmed, "#EXT-X-STREAM-INF:"), ",") {
-				if strings.HasPrefix(part, "BANDWIDTH=") {
-					fmt.Sscanf(strings.TrimPrefix(part, "BANDWIDTH="), "%d", &bw)
-				}
-			}
-			urlLine := ""
-			if i+1 < len(lines) {
-				urlLine = lines[i+1]
-				i++
-			}
-			if bw > 0 && bw < minBw { minBw = bw }
-			variants = append(variants, variant{inf: line, url: urlLine, bw: bw})
-		} else {
-			otherLines = append(otherLines, line)
-		}
-	}
-
-	if len(variants) == 0 { return body }
-
-	var filtered []string
-	for _, v := range variants {
-		// Retain variants <= clientAlloc or the absolute lowest fallback variant
-		if v.bw <= clientAlloc || v.bw == minBw {
-			filtered = append(filtered, v.inf, v.url)
-		}
-	}
-
-	// Reconstruct playlist
-	var out []string
-	for _, l := range otherLines {
-		out = append(out, l)
-		if strings.HasPrefix(strings.TrimSpace(l), "#EXTM3U") {
-			out = append(out, filtered...)
-		}
-	}
-	return []byte(strings.Join(out, "\n"))
-}
-
-func (h *ReverseProxyHandler) servePlaybackInfo(w http.ResponseWriter, r *http.Request) {
-	item := "unknown"
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	for i := 0; i+1 < len(parts); i++ { if strings.EqualFold(parts[i], "Items") { item=parts[i+1]; break } }
-	client := r.URL.Query().Get("DeviceId"); if client=="" {client=r.URL.Query().Get("PlaySessionId")}; if client=="" {client=r.RemoteAddr}
-	requested:=int64(0); if v:=r.URL.Query().Get("maxStreamingBitrate");v!="" { for _,c:=range v {if c>='0'&&c<='9' {requested=requested*10+int64(c-'0')}} }; if requested==0 {requested=100_000_000}
-	alloc:=h.abr.Allocate(client,item,requested); q:=r.URL.Query();q.Set("maxStreamingBitrate",fmt.Sprint(alloc));r.URL.RawQuery=q.Encode()
-	if r.Body!=nil {b,_:=io.ReadAll(r.Body); var v map[string]any; if json.Unmarshal(b,&v)==nil { for _,k:=range []string{"MaxStreamingBitrate","MaxStaticBitrate"}{v[k]=alloc}; if d,ok:=v["DeviceProfile"].(map[string]any);ok {d["MaxStreamingBitrate"]=alloc}; b,_=json.Marshal(v);r.Body=io.NopCloser(bytes.NewReader(b));r.ContentLength=int64(len(b)) } }
-	h.proxy.ServeHTTP(w,r)
-}
-
-func reqOrNil(r *http.Request) *http.Request {
-	return r
-}
-
-// classifyCacheableRequest determines if a request path is eligible for edge caching,
-// returning its category ("images" or "static"), extracted Jellyfin item ID (if any), and eligibility boolean.
-func classifyCacheableRequest(rawPath string) (category string, itemID string, ok bool) {
-	lowerPath := strings.ToLower(rawPath)
-
-	// 1. Static web assets under /web/
-	if idx := strings.Index(lowerPath, "/web/"); idx != -1 {
-		subPath := lowerPath[idx:] // starts with "/web/"
-		if subPath == "/web/index.html" || subPath == "/web/config.json" ||
-			strings.HasSuffix(subPath, "/web/index.html") || strings.HasSuffix(subPath, "/web/config.json") {
-			return "", "", false
-		}
-		for _, ext := range staticCacheExtensions {
-			if strings.HasSuffix(subPath, ext) {
-				return cache.CategoryStatic, "", true
-			}
-		}
-		return "", "", false
-	}
-
-	// 2. Jellyfin Images: paths containing /Images/ or matching /Items/{id}/Images/{type}
-	if strings.Contains(lowerPath, "/images/") {
-		return cache.CategoryImages, extractItemIDFromImagePath(rawPath), true
-	}
-
-	// 3. Media Segments (HLS fMP4 / TS / init.mp4 / subtitles / trickplay)
-	// Never cache dynamic playlists (.m3u8, .mpd)
-	if !strings.HasSuffix(lowerPath, ".m3u8") && !strings.HasSuffix(lowerPath, ".mpd") {
-		if strings.Contains(lowerPath, "/videos/") || strings.Contains(lowerPath, "/audio/") ||
-			strings.Contains(lowerPath, "/hls/") || strings.Contains(lowerPath, "/hls1/") {
-			for _, ext := range mediaSegmentExtensions {
-				if strings.HasSuffix(lowerPath, ext) {
-					return cache.CategoryMedia, extractItemIDFromMediaPath(rawPath), true
-				}
-			}
-		}
-	}
-
-	return "", "", false
-}
-
-// extractItemIDFromMediaPath parses the Jellyfin item ID from video/audio stream paths
-func extractItemIDFromMediaPath(rawPath string) string {
-	segments := strings.Split(strings.Trim(rawPath, "/"), "/")
-	for i := 0; i < len(segments)-1; i++ {
-		lower := strings.ToLower(segments[i])
-		if lower == "videos" || lower == "audio" {
-			candidate := segments[i+1]
-			if candidate != "" && !strings.Contains(candidate, ".") {
-				return candidate
-			}
-		}
-	}
-	return ""
-}
-
-// extractItemIDFromImagePath parses the Jellyfin item ID from paths like:
-// - /Items/{id}/Images/{type}
-// - /Users/{userId}/Items/{id}/Images/{type}
-// - /emby/Items/{id}/Images/{type}
-// - /Persons/{id}/Images/{type}
-// - /Artists/{id}/Images/{type}
-// - /Genres/{id}/Images/{type}
-// - /Studios/{id}/Images/{type}
-// - /Users/{id}/Images/{type}
-func extractItemIDFromImagePath(rawPath string) string {
-	segments := strings.Split(strings.Trim(rawPath, "/"), "/")
-	// Look specifically for "Items/{id}/Images" first
-	for i := 0; i < len(segments)-2; i++ {
-		if strings.EqualFold(segments[i], "Items") && strings.EqualFold(segments[i+2], "Images") {
-			return segments[i+1]
-		}
-	}
-	// Fallback: any "{Entity}/{id}/Images"
-	for i := 1; i < len(segments); i++ {
-		if strings.EqualFold(segments[i], "Images") && i >= 1 {
-			candidate := segments[i-1]
-			if !strings.EqualFold(candidate, "emby") && !strings.EqualFold(candidate, "jellyfin") {
-				return candidate
-			}
-		}
-	}
-	return ""
-}
-
-// buildCacheKey delegates to the canonical cache key implementation.
-func buildCacheKey(r *http.Request, category string) string {
-	return cache.BuildKey(category, r.URL.RequestURI())
-}
-
 func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.Request, category, itemID string) {
-	rawKey := buildCacheKey(r, category)
-	keyHash := cache.HashKey(rawKey)
+	keyHash := cache.HashKey(buildCacheKey(r, category))
+	clientID, clientName := clientIdentity(r)
 
-	// Check for cache HIT
+	// Check for cache HIT. Cache hits cost no home upload: this is what makes a viewer
+	// who starts the same title later free (spec case 9).
 	if file, meta, err := h.storage.Get(keyHash); err == nil {
 		defer file.Close()
-
-		// Restore cached headers
 		for k, vals := range meta.Headers {
 			for _, v := range vals {
 				w.Header().Add(k, v)
@@ -394,8 +265,14 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("X-JellyProxy-Cache", "HIT")
 
-		// Serve using http.ServeContent to support HTTP Range requests (206 Partial Content), ETag, and If-Modified-Since
-		http.ServeContent(w, r, "media", meta.CreatedAt, file)
+		var out http.ResponseWriter = w
+		if category == cache.CategoryMedia {
+			out = &meteredWriter{ResponseWriter: w, onWrite: func(n int) {
+				h.hub.Sent(clientID, clientName, itemID, n, true)
+			}}
+		}
+		// ServeContent supports HTTP Range requests (206), ETag and If-Modified-Since
+		http.ServeContent(out, r, "media", meta.CreatedAt, file)
 		return
 	}
 
@@ -418,20 +295,24 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Fetch from upstream
 	outReq, err := h.buildUpstreamRequest(r)
 	if err != nil {
 		h.proxy.ServeHTTP(w, r)
 		return
 	}
-	// Request uncompressed from upstream or preserve straightforward encoding so cached payloads work for all clients
+	// Request uncompressed so cached payloads work for all clients
 	outReq.Header.Del("Accept-Encoding")
 	outReq.Header.Del("If-None-Match")
 	outReq.Header.Del("If-Modified-Since")
 
+	var fetch *abr.Fetch
 	if category == cache.CategoryMedia {
 		atomic.AddInt32(&h.activeLiveUpstreamCount, 1)
 		defer atomic.AddInt32(&h.activeLiveUpstreamCount, -1)
+		if h.abr != nil {
+			fetch = h.abr.BeginFetchMode(clientID, itemID, false)
+			defer fetch.End()
+		}
 	}
 
 	resp, err := h.httpClient.Do(outReq)
@@ -442,7 +323,6 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 	}
 	defer resp.Body.Close()
 
-	// Copy upstream response headers to client
 	for k, vals := range resp.Header {
 		for _, v := range vals {
 			w.Header().Add(k, v)
@@ -468,17 +348,15 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 
 	w.WriteHeader(http.StatusOK)
 
-	// Stream response to client while teeing to temporary file on disk
-	teeReader := io.TeeReader(resp.Body, tmpFile)
-	_, copyErr := io.Copy(w, teeReader)
+	// Stream to the client while teeing to disk. Only media chunks are paced and
+	// accounted: they are the traffic that consumes the home upload.
+	copyErr := h.teeStream(r.Context(), w, tmpFile, resp.Body, category == cache.CategoryMedia, fetch, itemID, clientID, clientName)
 	closeErr := tmpFile.Close()
-
 	if copyErr != nil || closeErr != nil {
-		_ = h.storage.Delete(keyHash)
+		_ = os.Remove(tmpPath)
 		return
 	}
 
-	// Capture relevant headers for metadata
 	savedHeaders := make(map[string][]string)
 	for _, hdr := range cachedResponseHeaders {
 		if vals := resp.Header.Values(hdr); len(vals) > 0 {
@@ -497,9 +375,41 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 		Headers:      savedHeaders,
 		CreatedAt:    time.Now().UTC(),
 	}
-
 	if err := h.storage.CommitTempFile(tmpPath, meta); err != nil {
 		log.Printf("[JellyProxy] Warning: failed to commit cache file for %s: %v", r.URL.Path, err)
+	}
+}
+
+// teeStream copies src to both the client and the cache file in paced chunks.
+func (h *ReverseProxyHandler) teeStream(ctx context.Context, client io.Writer, disk io.Writer, src io.Reader,
+	media bool, fetch *abr.Fetch, itemID, clientID, clientName string) error {
+	flusher, _ := client.(http.Flusher)
+	buf := make([]byte, streamChunk)
+	for {
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if media {
+				h.paceAndCount(ctx, fetch, itemID, n)
+			}
+			if _, err := disk.Write(buf[:n]); err != nil {
+				return err
+			}
+			if _, err := client.Write(buf[:n]); err != nil {
+				return err
+			}
+			if media {
+				h.hub.Sent(clientID, clientName, itemID, n, false)
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if rerr == io.EOF {
+			return nil
+		}
+		if rerr != nil {
+			return rerr
+		}
 	}
 }
 
@@ -542,24 +452,4 @@ func (h *ReverseProxyHandler) buildUpstreamRequest(r *http.Request) (*http.Reque
 	}
 
 	return outReq, nil
-}
-
-func singleJoiningSlash(a, b string) string {
-	aslash := strings.HasSuffix(a, "/")
-	bslash := strings.HasPrefix(b, "/")
-	switch {
-	case aslash && bslash:
-		return a + b[1:]
-	case !aslash && !bslash:
-		return a + "/" + b
-	}
-	return a + b
-}
-
-func isWebSocket(req *http.Request) bool {
-	if req == nil {
-		return false
-	}
-	return strings.EqualFold(req.Header.Get("Upgrade"), "websocket") ||
-		strings.Contains(strings.ToLower(req.Header.Get("Connection")), "upgrade")
 }

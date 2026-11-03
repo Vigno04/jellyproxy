@@ -109,13 +109,13 @@
                         <div class="inputContainer">
                             <label class="inputLabel inputLabelUnfocused" for="txtProxyUrl">Proxy Edge URL:</label>
                             <input is="emby-input" type="text" id="txtProxyUrl" name="ProxyUrl" required placeholder="http://vps-ip:8080 or https://jellyproxy.domain.tld" />
-                            <div class="fieldDescription">The public URL of your JellyProxy Docker container deployed on your VPS or cloud host.</div>
+                            <div class="fieldDescription">The URL of your JellyProxy Docker container deployed on your VPS or cloud host.</div>
                         </div>
 
                         <div class="inputContainer">
                             <label class="inputLabel inputLabelUnfocused" for="txtSharedSecret">Shared Secret Token:</label>
                             <input is="emby-input" type="password" id="txtSharedSecret" name="SharedSecret" placeholder="Enter secure shared secret..." />
-                            <div class="fieldDescription">Optional shared token for authenticating control communications between this plugin and JellyProxy.</div>
+                            <div class="fieldDescription">Shared token for authenticating control communications between this plugin, the /proxy/ web dashboard, and JellyProxy.</div>
                         </div>
 
                         <div class="checkboxContainer checkboxContainer-withDescription">
@@ -123,7 +123,7 @@
                                 <input type="checkbox" is="emby-checkbox" id="chkAutoSyncPlayback" name="AutoSyncPlayback" />
                                 <span>Monitor Playback Sessions</span>
                             </label>
-                            <div class="fieldDescription checkboxFieldDescription">Notifies proxy of live playback state (pause, seek, resume) for intelligent prefetch.</div>
+                            <div class="fieldDescription checkboxFieldDescription">Notifies proxy of live playback state (pause, seek, resume) for intelligent prefetch and seek borrowing.</div>
                         </div>
 
                         <div class="checkboxContainer checkboxContainer-withDescription">
@@ -140,10 +140,15 @@
                                 <label class="inputLabel inputLabelUnfocused" for="txtAbrUpload">Upload Speed (Mbps):</label>
                                 <input is="emby-input" type="number" id="txtAbrUpload" min="1" />
                             </div>
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtAbrHeadroom">Headroom (%):</label>
+                                <input is="emby-input" type="number" id="txtAbrHeadroom" min="0" max="90" />
+                                <div class="fieldDescription">Percentage of upstream bandwidth kept free as safety margin against link saturation.</div>
+                            </div>
                             <div class="selectContainer">
                                 <label class="selectLabel" for="selAbrPolicy">Policy:</label>
                                 <select is="emby-select" id="selAbrPolicy" class="emby-select-withcolor emby-select">
-                                    <option value="FairShare">Fair Share</option>
+                                    <option value="FairShare">Fair Share (Quality-Weighted)</option>
                                     <option value="FirstComeFirstServed">First-Come First-Served</option>
                                 </select>
                             </div>
@@ -152,8 +157,33 @@
                                 <input is="emby-input" type="number" id="txtAbrMin" min="1" />
                             </div>
                             <div class="inputContainer">
-                                <label class="inputLabel inputLabelUnfocused" for="txtAbrCeiling">Single Client Ceiling (Mbps):</label>
+                                <label class="inputLabel inputLabelUnfocused" for="txtAbrCeiling">Single Client Ceiling (Mbps, 0 = unlimited):</label>
                                 <input is="emby-input" type="number" id="txtAbrCeiling" min="0" />
+                            </div>
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtAbrFastSec">Fast-Start Burst Duration (s):</label>
+                                <input is="emby-input" type="number" id="txtAbrFastSec" min="1" max="60" />
+                                <div class="fieldDescription">Duration in seconds a newly started stream borrows priority bandwidth to fill its initial buffer.</div>
+                            </div>
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtAbrFastPct">Fast-Start Link Share (%):</label>
+                                <input is="emby-input" type="number" id="txtAbrFastPct" min="10" max="99" />
+                                <div class="fieldDescription">Percentage of upload capacity reserved for bursting streams during fast-start or seek.</div>
+                            </div>
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtAbrSeekSec">Seek Borrow Duration (s):</label>
+                                <input is="emby-input" type="number" id="txtAbrSeekSec" min="1" max="30" />
+                                <div class="fieldDescription">Duration in seconds a seeking client borrows priority bandwidth to recover playback after scrubbing.</div>
+                            </div>
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtAbrBgPct">Background Prefetch Floor (%):</label>
+                                <input is="emby-input" type="number" id="txtAbrBgPct" min="1" max="50" />
+                                <div class="fieldDescription">Maximum share of upload used by pause-prefetch and pre-seed jobs while live playback is active.</div>
+                            </div>
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtAbrEncoders">Supported Video Encoders ("auto" or comma-separated):</label>
+                                <input is="emby-input" type="text" id="txtAbrEncoders" placeholder="auto (or h264,hevc,av1)" />
+                                <div class="fieldDescription">Set to "auto" to read Jellyfin's Transcoding settings (AllowHevcEncoding / AllowAv1Encoding), or specify comma-separated codecs.</div>
                             </div>
                             <div class="checkboxContainer checkboxContainer-withDescription">
                                 <label>
@@ -250,6 +280,16 @@
             const JellyProxyConfig = {
                 pluginId: 'e439d5e7-789a-4e2a-a9e3-2e45daec9312',
 
+                parseResponse: function (response) {
+                    if (response && typeof response.json === 'function') {
+                        return response.json();
+                    }
+                    if (typeof response === 'string') {
+                        try { return JSON.parse(response); } catch (e) {}
+                    }
+                    return response;
+                },
+
                 loadConfiguration: function () {
                     Dashboard.showLoadingMsg();
                     ApiClient.getPluginConfiguration(JellyProxyConfig.pluginId).then(function (config) {
@@ -259,10 +299,16 @@
                         document.querySelector('#chkEnableBandwidthShaping').checked = config.EnableBandwidthShaping !== false;
                         document.querySelector('#txtMaxStorageGb').value = config.MaxStorageGb !== undefined ? config.MaxStorageGb : 50;
                         document.querySelector('#txtAbrUpload').value = config.UploadSpeedMbps || 16;
+                        document.querySelector('#txtAbrHeadroom').value = config.HeadroomPercent !== undefined ? config.HeadroomPercent : 10;
                         document.querySelector('#selAbrPolicy').value = config.ShaperPolicy || 'FairShare';
-                        document.querySelector('#chkAbrDegrade').checked = config.AllowDegradingExisting === true;
+                        document.querySelector('#chkAbrDegrade').checked = config.AllowDegradingExisting !== false;
                         document.querySelector('#txtAbrMin').value = config.MinBitrateMbps || 2;
                         document.querySelector('#txtAbrCeiling').value = config.SingleClientCeilingMbps || 0;
+                        document.querySelector('#txtAbrFastSec').value = config.FastStartSeconds || 10;
+                        document.querySelector('#txtAbrFastPct').value = config.FastStartSharePercent || 90;
+                        document.querySelector('#txtAbrSeekSec').value = config.SeekBorrowSeconds || 4;
+                        document.querySelector('#txtAbrBgPct').value = config.BackgroundFloorPercent || 5;
+                        document.querySelector('#txtAbrEncoders').value = config.SupportedEncoders || 'auto';
 
                         if (config.LastHandshakeStatus) {
                             const statusElem = document.querySelector('#testConnectionStatus');
@@ -272,9 +318,37 @@
 
                         Dashboard.hideLoadingMsg();
                         JellyProxyConfig.loadStorageStats();
+                        JellyProxyConfig.syncLiveConfigFromProxy();
                     }).catch(function () {
                         Dashboard.hideLoadingMsg();
                     });
+                },
+
+                syncLiveConfigFromProxy: function () {
+                    ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Abr/Config') })
+                        .then(JellyProxyConfig.parseResponse)
+                        .then(function (cfg) {
+                            if (!cfg || typeof cfg !== 'object') return;
+                            if (cfg.enabled !== undefined) document.querySelector('#chkEnableBandwidthShaping').checked = Boolean(cfg.enabled);
+                            if (cfg.uploadSpeedBps > 0) document.querySelector('#txtAbrUpload').value = Math.round(cfg.uploadSpeedBps / 1000000);
+                            if (cfg.headroomPercent !== undefined) document.querySelector('#txtAbrHeadroom').value = cfg.headroomPercent;
+                            if (cfg.policy) document.querySelector('#selAbrPolicy').value = cfg.policy;
+                            if (cfg.allowDegradingExistingStreams !== undefined) document.querySelector('#chkAbrDegrade').checked = Boolean(cfg.allowDegradingExistingStreams);
+                            if (cfg.minBitrateBps > 0) document.querySelector('#txtAbrMin').value = Math.round(cfg.minBitrateBps / 1000000);
+                            if (cfg.singleClientCeilingBps !== undefined) document.querySelector('#txtAbrCeiling').value = Math.round(cfg.singleClientCeilingBps / 1000000);
+                            if (cfg.fastStartSeconds > 0) document.querySelector('#txtAbrFastSec').value = cfg.fastStartSeconds;
+                            if (cfg.fastStartSharePercent > 0) document.querySelector('#txtAbrFastPct').value = cfg.fastStartSharePercent;
+                            if (cfg.seekBorrowSeconds > 0) document.querySelector('#txtAbrSeekSec').value = cfg.seekBorrowSeconds;
+                            if (cfg.backgroundFloorPercent > 0) document.querySelector('#txtAbrBgPct').value = cfg.backgroundFloorPercent;
+                        }).catch(function () {});
+
+                    ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Abr/Capabilities') })
+                        .then(JellyProxyConfig.parseResponse)
+                        .then(function (caps) {
+                            if (caps && Array.isArray(caps.encoders) && caps.encoders.length > 0) {
+                                document.querySelector('#txtAbrEncoders').value = caps.encoders.join(',');
+                            }
+                        }).catch(function () {});
                 },
 
                 saveConfiguration: function (e) {
@@ -288,36 +362,69 @@
                         config.EnableBandwidthShaping = document.querySelector('#chkEnableBandwidthShaping').checked;
                         config.MaxStorageGb = parseFloat(document.querySelector('#txtMaxStorageGb').value) || 50.0;
                         config.UploadSpeedMbps = parseInt(document.querySelector('#txtAbrUpload').value, 10) || 16;
+                        config.HeadroomPercent = parseInt(document.querySelector('#txtAbrHeadroom').value, 10) || 0;
                         config.ShaperPolicy = document.querySelector('#selAbrPolicy').value || 'FairShare';
                         config.AllowDegradingExisting = document.querySelector('#chkAbrDegrade').checked;
                         config.MinBitrateMbps = parseInt(document.querySelector('#txtAbrMin').value, 10) || 2;
                         config.SingleClientCeilingMbps = parseInt(document.querySelector('#txtAbrCeiling').value, 10) || 0;
+                        config.FastStartSeconds = parseInt(document.querySelector('#txtAbrFastSec').value, 10) || 10;
+                        config.FastStartSharePercent = parseInt(document.querySelector('#txtAbrFastPct').value, 10) || 90;
+                        config.SeekBorrowSeconds = parseInt(document.querySelector('#txtAbrSeekSec').value, 10) || 4;
+                        config.BackgroundFloorPercent = parseInt(document.querySelector('#txtAbrBgPct').value, 10) || 5;
+                        config.SupportedEncoders = document.querySelector('#txtAbrEncoders').value || 'auto';
 
                         ApiClient.updatePluginConfiguration(JellyProxyConfig.pluginId, config).then(function (result) {
                             Dashboard.processPluginConfigurationUpdateResult(result);
                             const abrPayload = {
                                 enabled: config.EnableBandwidthShaping,
                                 uploadSpeedBps: config.UploadSpeedMbps * 1000000,
+                                headroomPercent: config.HeadroomPercent,
                                 policy: config.ShaperPolicy,
                                 allowDegradingExistingStreams: config.AllowDegradingExisting,
                                 minBitrateBps: config.MinBitrateMbps * 1000000,
-                                singleClientCeilingBps: config.SingleClientCeilingMbps * 1000000
+                                singleClientCeilingBps: config.SingleClientCeilingMbps * 1000000,
+                                fastStartSeconds: config.FastStartSeconds,
+                                fastStartSharePercent: config.FastStartSharePercent,
+                                seekBorrowSeconds: config.SeekBorrowSeconds,
+                                backgroundFloorPercent: config.BackgroundFloorPercent
                             };
-                            ApiClient.ajax({
-                                type: 'POST',
-                                url: ApiClient.getUrl('JellyProxy/Abr/Config'),
-                                data: JSON.stringify(abrPayload),
-                                contentType: 'application/json'
-                            }).catch(function() {}).then(function() {
-                                JellyProxyConfig.loadAbrStatus();
-                            });
-                        }).catch(function (err) {
+                            ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/DetectedEncoders') })
+                                .then(JellyProxyConfig.parseResponse)
+                                .catch(function () { return null; })
+                                .then(function (detected) {
+                                    const encodersList = (detected && Array.isArray(detected.encoders) && detected.encoders.length > 0)
+                                        ? detected.encoders
+                                        : config.SupportedEncoders.split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s && s.toLowerCase() !== 'auto'; });
+
+                                    return Promise.all([
+                                        ApiClient.ajax({
+                                            type: 'POST',
+                                            url: ApiClient.getUrl('JellyProxy/Abr/Config'),
+                                            data: JSON.stringify(abrPayload),
+                                            contentType: 'application/json'
+                                        }).catch(function () {}),
+                                        ApiClient.ajax({
+                                            type: 'POST',
+                                            url: ApiClient.getUrl('JellyProxy/Abr/Capabilities'),
+                                            data: JSON.stringify({ encoders: encodersList.length ? encodersList : ['h264', 'hevc'] }),
+                                            contentType: 'application/json'
+                                        }).catch(function () {}),
+                                        ApiClient.ajax({
+                                            type: 'POST',
+                                            url: ApiClient.getUrl('JellyProxy/UpdateStorageConfig'),
+                                            data: JSON.stringify({ MaxStorageGb: config.MaxStorageGb }),
+                                            contentType: 'application/json'
+                                        }).catch(function () {})
+                                    ]);
+                                }).then(function () {
+                                    JellyProxyConfig.loadAbrStatus();
+                                    JellyProxyConfig.loadStorageStats();
+                                });
+                        }).catch(function () {
                             Dashboard.hideLoadingMsg();
-                            console.error('Failed to update plugin configuration:', err);
                         });
-                    }).catch(function (err) {
+                    }).catch(function () {
                         Dashboard.hideLoadingMsg();
-                        console.error('Failed to get plugin configuration:', err);
                     });
                     return false;
                 },
@@ -337,15 +444,7 @@
                         url: ApiClient.getUrl('JellyProxy/TestConnection'),
                         data: JSON.stringify(payload),
                         contentType: 'application/json'
-                    }).then(function (response) {
-                        if (response && typeof response.json === 'function') {
-                            return response.json();
-                        }
-                        if (typeof response === 'string') {
-                            try { return JSON.parse(response); } catch (e) {}
-                        }
-                        return response;
-                    }).then(function (data) {
+                    }).then(JellyProxyConfig.parseResponse).then(function (data) {
                         const isSuccess = data && (data.success === true || data.Success === true);
                         const msg = data && (data.message || data.Message);
                         if (isSuccess) {
@@ -355,8 +454,8 @@
                             statusElem.innerText = '✗ ' + (msg || 'Connection failed');
                             statusElem.style.color = '#f44336';
                         }
-                    }).catch(function (err) {
-                        statusElem.innerText = '✗ Network error: ' + (err.message || err);
+                    }).catch(function () {
+                        statusElem.innerText = '✗ Network error connecting to proxy';
                         statusElem.style.color = '#f44336';
                     });
                 },
@@ -365,17 +464,9 @@
                     ApiClient.ajax({
                         type: 'GET',
                         url: ApiClient.getUrl('JellyProxy/Storage')
-                    }).then(function (response) {
-                        if (response && typeof response.json === 'function') {
-                            return response.json();
-                        }
-                        if (typeof response === 'string') {
-                            try { return JSON.parse(response); } catch (e) {}
-                        }
-                        return response;
-                    }).then(function (data) {
+                    }).then(JellyProxyConfig.parseResponse).then(function (data) {
                         if (!data) return;
-                        
+
                         const cats = data.categories || data.Categories || {};
                         const imagesCat = cats.images || cats.Images || {};
                         const staticCat = cats.static || cats.Static || {};
@@ -386,6 +477,10 @@
                         const imagesBytes = imagesCat.used_bytes ?? imagesCat.UsedBytes ?? data.images_bytes ?? data.ImagesBytes ?? 0;
                         const staticBytes = staticCat.used_bytes ?? staticCat.UsedBytes ?? data.static_bytes ?? data.StaticBytes ?? 0;
                         const mediaBytes = mediaCat.used_bytes ?? mediaCat.UsedBytes ?? data.media_bytes ?? data.MediaBytes ?? 0;
+
+                        if (data.max_storage_gb > 0) {
+                            document.querySelector('#txtMaxStorageGb').value = data.max_storage_gb;
+                        }
 
                         const totalUsedMb = (totalUsedBytes / (1024 * 1024)).toFixed(1);
                         const maxQuotaGb = (maxQuotaBytes / (1024 * 1024 * 1024)).toFixed(1);
@@ -410,11 +505,10 @@
                         document.querySelector('#statImages').innerText = (imagesBytes / (1024 * 1024)).toFixed(1) + ' MB';
                         document.querySelector('#statStatic').innerText = (staticBytes / (1024 * 1024)).toFixed(1) + ' MB';
                         document.querySelector('#statMedia').innerText = (mediaBytes / (1024 * 1024)).toFixed(1) + ' MB';
-                        
+
                         const freeBytes = Math.max(0, maxQuotaBytes - totalUsedBytes);
                         document.querySelector('#statFree').innerText = (freeBytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
-                    }).catch(function (err) {
-                        console.warn('Failed to load storage stats:', err);
+                    }).catch(function () {
                         document.querySelector('#lblStorageSummary').innerText = 'Storage Usage: Offline or unconfigured';
                     });
                 },
@@ -433,21 +527,13 @@
                         url: ApiClient.getUrl('JellyProxy/UpdateStorageConfig'),
                         data: JSON.stringify(payload),
                         contentType: 'application/json'
-                    }).then(function (response) {
-                        if (response && typeof response.json === 'function') {
-                            return response.json();
-                        }
-                        if (typeof response === 'string') {
-                            try { return JSON.parse(response); } catch (e) {}
-                        }
-                        return response;
-                    }).then(function (data) {
+                    }).then(JellyProxyConfig.parseResponse).then(function () {
                         statusElem.innerText = '✓ Storage quota updated!';
                         statusElem.style.color = '#4caf50';
                         JellyProxyConfig.loadStorageStats();
-                        setTimeout(() => { statusElem.innerText = ''; }, 3000);
-                    }).catch(function (err) {
-                        statusElem.innerText = '✗ Failed: ' + (err.message || err);
+                        setTimeout(function () { statusElem.innerText = ''; }, 3000);
+                    }).catch(function () {
+                        statusElem.innerText = '✗ Failed to update storage quota';
                         statusElem.style.color = '#f44336';
                     });
                 },
@@ -466,84 +552,77 @@
                         url: ApiClient.getUrl('JellyProxy/Purge'),
                         data: JSON.stringify(payload),
                         contentType: 'application/json'
-                    }).then(function (response) {
-                        if (response && typeof response.json === 'function') {
-                            return response.json();
-                        }
-                        if (typeof response === 'string') {
-                            try { return JSON.parse(response); } catch (e) {}
-                        }
-                        return response;
-                    }).then(function (data) {
+                    }).then(JellyProxyConfig.parseResponse).then(function () {
                         statusElem.innerText = '✓ Purge successful (' + category + ')!';
                         statusElem.style.color = '#4caf50';
                         JellyProxyConfig.loadStorageStats();
                         setTimeout(function () { statusElem.innerText = ''; }, 4000);
-                    }).catch(function (err) {
-                        statusElem.innerText = '✗ Purge failed: ' + (err.message || err);
+                    }).catch(function () {
+                        statusElem.innerText = '✗ Purge failed';
                         statusElem.style.color = '#f44336';
                     });
                 },
 
                 loadAbrStatus: function () {
-                    ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Abr/Status') }).then(function (response) {
-                        if (response && typeof response.json === 'function') {
-                            return response.json();
-                        }
-                        if (typeof response === 'string') {
-                            try { return JSON.parse(response); } catch (e) {}
-                        }
-                        return response;
-                    }).then(function (data) {
-                        const status = (typeof data === 'string' ? JSON.parse(data) : data) || {};
-                        const totalMb = (((status.totalBps ?? status.TotalBps) || 0) / 1000000).toFixed(1);
-                        const usedMb = (((status.usedBps ?? status.UsedBps) || 0) / 1000000).toFixed(1);
-                        const active = (status.activePipes ?? status.ActivePipes) || 0;
-                        const cfg = status.config || status.Config || {};
-                        const policy = cfg.policy || cfg.Policy || 'FairShare';
-                        const elem = document.querySelector('#abrStatus');
-                        if (elem) {
-                            elem.innerText = 'Bandwidth: ' + usedMb + ' / ' + totalMb + ' Mbps used (' + active + ' active pipes, Policy: ' + policy + ')';
-                        }
-                    }).catch(function () {
-                        const elem = document.querySelector('#abrStatus');
-                        if (elem) elem.innerText = 'Bandwidth shaper: ready';
-                    });
+                    ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Abr/Status') })
+                        .then(JellyProxyConfig.parseResponse)
+                        .then(function (data) {
+                            const status = (typeof data === 'string' ? JSON.parse(data) : data) || {};
+                            const totalMb = (((status.totalBps ?? status.TotalBps) || 0) / 1000000).toFixed(1);
+                            const usedMb = (((status.usedBps ?? status.UsedBps) || 0) / 1000000).toFixed(1);
+                            const active = (status.activePipes ?? status.ActivePipes) || 0;
+                            const cfg = status.config || status.Config || {};
+                            const policy = cfg.policy || cfg.Policy || 'FairShare';
+                            const elem = document.querySelector('#abrStatus');
+                            if (elem) {
+                                elem.innerText = 'Bandwidth: ' + usedMb + ' / ' + totalMb + ' Mbps used (' + active + ' active pipes, Policy: ' + policy + ')';
+                            }
+                        }).catch(function () {
+                            const elem = document.querySelector('#abrStatus');
+                            if (elem) elem.innerText = 'Bandwidth shaper: ready';
+                        });
                 },
 
                 loadPreseedJobs: function () {
-                    ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Preseed/Jobs') }).then(function (response) {
-                        if (response && typeof response.json === 'function') {
-                            return response.json();
-                        }
-                        if (typeof response === 'string') {
-                            try { return JSON.parse(response); } catch (e) {}
-                        }
-                        return response;
-                    }).then(function (data) {
-                        const jobs = (typeof data === 'string' ? JSON.parse(data) : data) || [];
-                        const container = document.querySelector('#preseedJobs');
-                        if (!container) return;
-                        if (!Array.isArray(jobs) || jobs.length === 0) {
-                            container.innerHTML = '<div style="opacity: 0.7; font-size: 0.9em;">No active pre-seeding jobs.</div>';
-                            return;
-                        }
-                        container.innerHTML = jobs.map(function (j) {
-                            const btn = (j.status === 'running') ? ' <button type="button" data-job="' + (j.id || '') + '" class="jpCancel">Cancel</button>' : '';
-                            return '<div>' + (j.item_name || j.id || 'Job') + ': ' + (j.status || '') + ' (' + (j.completed || 0) + '/' + (j.total_segments || 0) + ')' + btn + '</div>';
-                        }).join('');
-                        container.querySelectorAll('.jpCancel').forEach(function (b) {
-                            b.onclick = function () {
-                                ApiClient.ajax({
-                                    type: 'POST',
-                                    url: ApiClient.getUrl('JellyProxy/Preseed/Cancel'),
-                                    data: JSON.stringify({ id: b.dataset.job }),
-                                    contentType: 'application/json'
-                                }).then(JellyProxyConfig.loadPreseedJobs);
-                            };
-                        });
-                    }).catch(function () {});
+                    ApiClient.ajax({ type: 'GET', url: ApiClient.getUrl('JellyProxy/Preseed/Jobs') })
+                        .then(JellyProxyConfig.parseResponse)
+                        .then(function (data) {
+                            const jobs = (typeof data === 'string' ? JSON.parse(data) : data) || [];
+                            const container = document.querySelector('#preseedJobs');
+                            if (!container) return;
+                            container.replaceChildren();
+                            if (!Array.isArray(jobs) || jobs.length === 0) {
+                                const empty = document.createElement('div');
+                                empty.style.opacity = '0.7';
+                                empty.style.fontSize = '0.9em';
+                                empty.textContent = 'No active pre-seeding jobs.';
+                                container.appendChild(empty);
+                                return;
+                            }
+                            jobs.forEach(function (j) {
+                                const row = document.createElement('div');
+                                const label = document.createElement('span');
+                                label.textContent = (j.item_name || j.id || 'Job') + ': ' + (j.status || '') + ' (' + (j.completed || 0) + '/' + (j.total_segments || 0) + ') ';
+                                row.appendChild(label);
+                                if (j.status === 'running') {
+                                    const btn = document.createElement('button');
+                                    btn.type = 'button';
+                                    btn.textContent = 'Cancel';
+                                    btn.addEventListener('click', function () {
+                                        ApiClient.ajax({
+                                            type: 'POST',
+                                            url: ApiClient.getUrl('JellyProxy/Preseed/Cancel'),
+                                            data: JSON.stringify({ id: j.id || '' }),
+                                            contentType: 'application/json'
+                                        }).then(JellyProxyConfig.loadPreseedJobs);
+                                    });
+                                    row.appendChild(btn);
+                                }
+                                container.appendChild(row);
+                            });
+                        }).catch(function () {});
                 },
+
                 startPreseed: function () {
                     const value = document.querySelector('#txtPreseedItem').value.trim();
                     if (!value) return;
