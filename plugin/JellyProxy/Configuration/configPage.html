@@ -95,7 +95,7 @@
     </style>
 </head>
 <body>
-    <div id="JellyProxyConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+    <div id="JellyProxyConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox,emby-select">
         <div data-role="content">
             <div class="content-primary">
                 <form id="jellyProxyConfigForm">
@@ -136,12 +136,33 @@
 
                         <div class="verticalSection" style="margin-top: 2em; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 1em;">
                             <h3 class="sectionTitle">Adaptive Bandwidth Shaper (ABR)</h3>
-                            <div class="inputContainer"><label>Upload Speed (Mbps)</label><input is="emby-input" type="number" id="txtAbrUpload" min="1" /></div>
-                            <div class="inputContainer"><label>Policy</label><select is="emby-select" id="selAbrPolicy"><option value="FairShare">Fair Share</option><option value="FirstComeFirstServed">First-Come First-Served</option></select></div>
-                            <div class="inputContainer"><label>Min Bitrate (Mbps)</label><input is="emby-input" type="number" id="txtAbrMin" min="1" /></div>
-                            <div class="inputContainer"><label>Single Client Ceiling (Mbps)</label><input is="emby-input" type="number" id="txtAbrCeiling" min="0" /></div>
-                            <div class="checkboxContainer"><label><input type="checkbox" is="emby-checkbox" id="chkAbrDegrade" /> Allow Degrading Existing Streams</label></div>
-                            <div id="abrStatus" class="fieldDescription">Bandwidth status: loading...</div>
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtAbrUpload">Upload Speed (Mbps):</label>
+                                <input is="emby-input" type="number" id="txtAbrUpload" min="1" />
+                            </div>
+                            <div class="selectContainer">
+                                <label class="selectLabel" for="selAbrPolicy">Policy:</label>
+                                <select is="emby-select" id="selAbrPolicy" class="emby-select-withcolor emby-select">
+                                    <option value="FairShare">Fair Share</option>
+                                    <option value="FirstComeFirstServed">First-Come First-Served</option>
+                                </select>
+                            </div>
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtAbrMin">Min Bitrate (Mbps):</label>
+                                <input is="emby-input" type="number" id="txtAbrMin" min="1" />
+                            </div>
+                            <div class="inputContainer">
+                                <label class="inputLabel inputLabelUnfocused" for="txtAbrCeiling">Single Client Ceiling (Mbps):</label>
+                                <input is="emby-input" type="number" id="txtAbrCeiling" min="0" />
+                            </div>
+                            <div class="checkboxContainer checkboxContainer-withDescription">
+                                <label>
+                                    <input type="checkbox" is="emby-checkbox" id="chkAbrDegrade" name="AllowDegradingExisting" />
+                                    <span>Allow Degrading Existing Streams</span>
+                                </label>
+                                <div class="fieldDescription checkboxFieldDescription">Permits the bandwidth shaper to throttle existing active streams when new clients connect.</div>
+                            </div>
+                            <div id="abrStatus" class="fieldDescription" style="margin-top: 1em;">Bandwidth status: loading...</div>
                         </div>
 
                         <div style="margin: 2em 0 1em 0;">
