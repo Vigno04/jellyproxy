@@ -8,12 +8,12 @@
     "category": "General",
     "versions": [
       {
-        "version": "0.5.0.0",
+        "version": "0.5.1.0",
         "targetAbi": "10.11.6.0",
-        "sourceUrl": "https://raw.githubusercontent.com/jellyproxy-project/jellyproxy/refs/heads/main/packages/jellyproxy-0.5.0.zip",
-        "checksum": "55d24632db9c1aee0166331247ddcd62",
-        "timestamp": "2026-11-02T23:44:20Z",
-        "changelog": "Phase 5: Adaptive Bandwidth Shaper (ABR), dynamic PlaybackInfo bitrate negotiation, water-filling allocation, and HLS master variant filtering."
+        "sourceUrl": "https://raw.githubusercontent.com/jellyproxy-project/jellyproxy/refs/heads/main/packages/jellyproxy-0.5.1.zip",
+        "checksum": "0c05436e777cfe9c11a081691a851560",
+        "timestamp": "2026-11-03T07:05:51Z",
+        "changelog": "Fix configuration page SPA lifecycle, remove invalid ES6 template literals breaking Jellyfin Web translation, add ABR controller timeouts, and unify BandwidthManager instance."
       }
     ]
   }
