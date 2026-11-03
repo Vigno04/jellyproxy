@@ -132,6 +132,11 @@ func NewReverseProxyHandler(cfg *config.Config, storage *cache.StorageManager) (
 	}, nil
 }
 
+// SetABR assigns a shared BandwidthManager to the reverse proxy handler
+func (h *ReverseProxyHandler) SetABR(m *abr.BandwidthManager) {
+	h.abr = m
+}
+
 // ServeHTTP inspects requests for cache eligibility and either serves from cache, tees from upstream, or passes through
 func (h *ReverseProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.abr != nil && r.Method == http.MethodPost && strings.HasSuffix(strings.ToLower(r.URL.Path), "/playbackinfo") {

@@ -179,8 +179,17 @@ public class JellyProxyController : ControllerBase
         var message = new HttpRequestMessage(method, $"{config.ProxyUrl.TrimEnd('/')}/jellyproxy/api/abr/{operation}");
         if (payload != null) message.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, MediaTypeNames.Application.Json);
         if (!string.IsNullOrWhiteSpace(config.SharedSecret)) message.Headers.TryAddWithoutValidation("X-JellyProxy-Secret", config.SharedSecret);
-        var response = await _httpClientFactory.CreateClient("JellyProxy").SendAsync(message);
-        return new ContentResult { StatusCode = (int)response.StatusCode, ContentType = MediaTypeNames.Application.Json, Content = await response.Content.ReadAsStringAsync() };
+        try
+        {
+            using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var response = await _httpClientFactory.CreateClient("JellyProxy").SendAsync(message, cts.Token).ConfigureAwait(false);
+            return new ContentResult { StatusCode = (int)response.StatusCode, ContentType = MediaTypeNames.Application.Json, Content = await response.Content.ReadAsStringAsync().ConfigureAwait(false) };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to relay ABR request {Operation} to proxy", operation);
+            return StatusCode(StatusCodes.Status502BadGateway, new { success = false, message = "Proxy unreachable: " + ex.Message });
+        }
     }
 
     [HttpGet("Storage")]
@@ -381,9 +390,18 @@ public class JellyProxyController : ControllerBase
         var message = new HttpRequestMessage(method, $"{config.ProxyUrl.TrimEnd('/')}/jellyproxy/api/preseed/{operation}");
         if (payload != null) message.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, MediaTypeNames.Application.Json);
         if (!string.IsNullOrWhiteSpace(config.SharedSecret)) message.Headers.TryAddWithoutValidation("X-JellyProxy-Secret", config.SharedSecret);
-        var response = await _httpClientFactory.CreateClient("JellyProxy").SendAsync(message);
-        var body = await response.Content.ReadAsStringAsync();
-        return new ContentResult { StatusCode = (int)response.StatusCode, ContentType = MediaTypeNames.Application.Json, Content = body };
+        try
+        {
+            using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var response = await _httpClientFactory.CreateClient("JellyProxy").SendAsync(message, cts.Token).ConfigureAwait(false);
+            var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            return new ContentResult { StatusCode = (int)response.StatusCode, ContentType = MediaTypeNames.Application.Json, Content = body };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to relay Preseed request {Operation} to proxy", operation);
+            return StatusCode(StatusCodes.Status502BadGateway, new { success = false, message = "Proxy unreachable: " + ex.Message });
+        }
     }
 }
 

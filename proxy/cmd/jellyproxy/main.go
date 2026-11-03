@@ -52,6 +52,7 @@ func main() {
 	cacheAPI := handlers.NewCacheAPIHandler(cfg, storageMgr)
 	preseedAPI := handlers.NewPreseedAPI(cfg, preseed.NewManager(storageMgr, cfg.UpstreamURL, cfg.UpstreamHost, proxyHandler.ActiveLiveUpstreamCount()))
 	abrManager := abr.NewBandwidthManager(abr.Config{Enabled: true, UploadSpeedBps: 16_000_000})
+	proxyHandler.SetABR(abrManager)
 	abrAPI := &handlers.ABRAPI{Manager: abrManager}
 
 	// Custom router multiplexer
