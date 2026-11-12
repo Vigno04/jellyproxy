@@ -43,19 +43,32 @@ func BuildMediaKey(rawURL string) string {
 		"AudioSampleRate", "audioSampleRate",
 		"MaxFramerate", "maxFramerate",
 		"MaxWidth", "maxWidth", "MaxHeight", "maxHeight",
+		"AudioCodec", "audioCodec",
+		"SubtitleCodec", "subtitleCodec",
+		"Container", "container",
+		"TranscodingProtocol", "transcodingProtocol",
+		"EnableSubtitlesInManifest", "enableSubtitlesInManifest",
+		"EnableMpegtsM2TsMode", "enableMpegtsM2TsMode",
+		"Context", "context",
 	} {
 		q.Del(key)
 	}
 	for key := range q {
 		lk := strings.ToLower(key)
-		if strings.HasPrefix(lk, "h264-") || strings.HasPrefix(lk, "hevc-") || strings.HasPrefix(lk, "av1-") || strings.HasPrefix(lk, "vp9-") {
+		if strings.HasPrefix(lk, "h264-") || strings.HasPrefix(lk, "hevc-") || strings.HasPrefix(lk, "av1-") ||
+			strings.HasPrefix(lk, "vp9-") || strings.HasPrefix(lk, "aac-") || strings.HasPrefix(lk, "ac3-") ||
+			strings.HasPrefix(lk, "eac3-") || strings.HasPrefix(lk, "opus-") || strings.HasPrefix(lk, "flac-") {
 			q.Del(key)
 		}
 	}
 	if msID := q.Get("MediaSourceId"); msID != "" {
 		q.Set("MediaSourceId", normalizeID(msID))
 	}
-	if !strings.EqualFold(q.Get("SubtitleMethod"), "Encode") {
+	subIdx := strings.TrimSpace(q.Get("SubtitleStreamIndex"))
+	if strings.EqualFold(q.Get("SubtitleMethod"), "Encode") && subIdx != "" && subIdx != "-1" {
+		q.Set("SubtitleMethod", "Encode")
+		q.Set("SubtitleStreamIndex", subIdx)
+	} else {
 		q.Del("SubtitleMethod")
 		q.Del("SubtitleStreamIndex")
 	}

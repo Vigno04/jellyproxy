@@ -41,9 +41,10 @@ func TestPreferTextSubtitleDelivery(t *testing.T) {
 }
 
 func TestBurnsInSubtitles(t *testing.T) {
-	yes := `{"MediaSources":[{"TranscodingUrl":"/videos/1/master.m3u8?SubtitleMethod=Encode&x=1"}]}`
+	yes := `{"MediaSources":[{"TranscodingUrl":"/videos/1/master.m3u8?SubtitleMethod=Encode&SubtitleStreamIndex=3&x=1"}]}`
+	noIdx := `{"MediaSources":[{"TranscodingUrl":"/videos/1/master.m3u8?SubtitleMethod=Encode&x=1"}]}`
 	no := `{"MediaSources":[{"TranscodingUrl":"/videos/1/master.m3u8?SubtitleMethod=External"}]}`
-	if !burnsInSubtitles([]byte(yes)) || burnsInSubtitles([]byte(no)) || burnsInSubtitles([]byte("junk")) {
+	if !burnsInSubtitles([]byte(yes)) || burnsInSubtitles([]byte(noIdx)) || burnsInSubtitles([]byte(no)) || burnsInSubtitles([]byte("junk")) {
 		t.Fatal("burn-in detection wrong")
 	}
 }

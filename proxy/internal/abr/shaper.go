@@ -18,6 +18,9 @@ package abr
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -25,7 +28,9 @@ import (
 )
 
 const (
-	idleTimeout = time.Minute
+	idleTimeout      = 25 * time.Second
+	unstartedTimeout = 10 * time.Second
+	pipeBurstBytes   = 512 * 1024
 
 	// PolicyFairShare gives every pipe an equal claim on the link, degrading streams
 	// only when the sum of demands exceeds capacity.
@@ -94,22 +99,32 @@ type Status struct {
 }
 
 type pipe struct {
-	key         string
-	item        string
-	clients     map[string]bool
-	codec       string
-	requested   int64
-	allocated   int64
-	pull        int64
-	weight      float64
-	seq         uint64
-	lastSeen    time.Time
-	firstSeen   time.Time
-	burstUntil  time.Time
-	burstReason string
-	pulling     int
-	bytesPulled int64
-	bucket      *Bucket
+	key                 string
+	item                string
+	clients             map[string]bool
+	codec               string
+	requested           int64
+	allocated           int64
+	pull                int64
+	weight              float64
+	seq                 uint64
+	lastSeen            time.Time
+	firstSeen           time.Time
+	burstUntil          time.Time
+	burstReason         string
+	pulling             int
+	bytesPulled         int64
+	bucket              *Bucket
+	ownerClient         string
+	ownerQuery          url.Values
+	ownerHeaders        map[string]string
+	originalTotalBps    int64
+	activeVideoBps      int64
+	activeAudioBps      int64
+	basePlaySessionID   string
+	activePlaySessionID string
+	switchSeq           int
+	lastSwitchAt        time.Time
 }
 
 // BandwidthManager owns the pipe table and the fairness computation.
@@ -145,7 +160,7 @@ func NewBandwidthManager(c Config) *BandwidthManager {
 		clientPipe: make(map[string]string),
 		caps:       &Capabilities{},
 		bg:         NewBucket(0, 64*1024),
-		link:       NewBucket(0, 64*1024),
+		link:       NewBucket(0, pipeBurstBytes),
 	}
 	m.link.SetRate(m.capacityLocked())
 	return m
@@ -300,13 +315,8 @@ func (m *BandwidthManager) negotiateLocked(req Request) Decision {
 		if len(encodable) == 0 {
 			encodable = accepted
 		}
-		if existing := m.pipeForItem(req.ItemID); existing != nil && existing.codec != "" &&
-			existing.codec != CodecUnknown && !req.DirectPlay {
-			if containsCodec(accepted, existing.codec) {
-				sig.Codec = existing.codec // join the warm stream
-			} else {
-				sig.Codec = encodable[0]
-			}
+		if existing := m.matchingPipeForItem(req.ItemID, clientID, accepted); existing != nil && !req.DirectPlay {
+			sig.Codec = existing.codec // join the compatible warm stream
 		} else if len(encodable) > 0 {
 			sig.Codec = encodable[0]
 		}
@@ -323,7 +333,7 @@ func (m *BandwidthManager) negotiateLocked(req Request) Decision {
 			clients:   make(map[string]bool),
 			seq:       m.seq,
 			firstSeen: now,
-			bucket:    NewBucket(0, 64*1024),
+			bucket:    NewBucket(0, pipeBurstBytes),
 		}
 		m.pipes[key] = p
 		// A brand new stream is a cold start: grant the fast-start burst (spec case 8).
@@ -395,6 +405,29 @@ func (m *BandwidthManager) pipeForItem(itemID string) *pipe {
 			continue
 		}
 		if best == nil || p.lastSeen.After(best.lastSeen) || (p.lastSeen.Equal(best.lastSeen) && p.seq > best.seq) {
+			best = p
+		}
+	}
+	return best
+}
+
+func (m *BandwidthManager) matchingPipeForItem(itemID, clientID string, accepted []string) *pipe {
+	norm := normalizeItem(itemID)
+	if cur := m.pipeForClient(clientID); cur != nil && cur.item == norm && cur.codec != "" &&
+		cur.codec != CodecUnknown && containsCodec(accepted, cur.codec) {
+		return cur
+	}
+	var best *pipe
+	for _, p := range m.pipes {
+		if p.item != norm || p.codec == "" || p.codec == CodecUnknown || strings.Contains(p.key, "|direct:") {
+			continue
+		}
+		if !containsCodec(accepted, p.codec) {
+			continue
+		}
+		if best == nil || CodecEfficiency(p.codec) < CodecEfficiency(best.codec) ||
+			(CodecEfficiency(p.codec) == CodecEfficiency(best.codec) &&
+				(p.lastSeen.After(best.lastSeen) || (p.lastSeen.Equal(best.lastSeen) && p.seq > best.seq))) {
 			best = p
 		}
 	}
@@ -503,10 +536,12 @@ func (m *BandwidthManager) BeginFetchMode(clientID, itemID string, isDirect bool
 		return nil
 	}
 	if p.bucket == nil {
-		p.bucket = NewBucket(0, 64*1024)
+		p.bucket = NewBucket(0, pipeBurstBytes)
 	}
+	now := time.Now()
 	p.pulling++
-	p.lastSeen = time.Now()
+	p.lastSeen = now
+	m.cleanup(now)
 	m.reallocate()
 	key := p.key
 	bucket := p.bucket
@@ -543,8 +578,154 @@ func (f *Fetch) End() {
 	f.m.mu.Lock()
 	if p := f.m.pipes[f.key]; p != nil && p.pulling > 0 {
 		p.pulling--
+		f.m.reallocate()
 	}
 	f.m.mu.Unlock()
+}
+
+// CheckBitrateSwitch compares the bitrate baked into a client's HLS segment URL
+// against the pipe's current fair-share allocation. When another incompatible stream
+// joins (or leaves) and the pipe's allocation drops below (or recovers toward) the
+// client's original bitrate, it returns the target VideoBitrate, the derived
+// PlaySessionId (so Jellyfin never serves stale pre-transcoded segments from the old
+// PlaySessionId's transcode folder), the previous PlaySessionId to terminate, and
+// whether upstream ffmpeg must be restarted at the current segment's runtimeTicks.
+func (f *Fetch) CheckBitrateSwitch(urlVideoBps, urlAudioBps int64, urlPlaySessionID string) (targetVideoBps int64, activePlaySessionID, oldPlaySessionID string, restart bool) {
+	if f == nil || f.m == nil || urlVideoBps <= 0 {
+		return urlVideoBps, urlPlaySessionID, "", false
+	}
+	f.m.mu.Lock()
+	defer f.m.mu.Unlock()
+	if !f.m.cfg.Enabled {
+		return urlVideoBps, urlPlaySessionID, "", false
+	}
+	p := f.m.pipes[f.key]
+	if p == nil || p.allocated <= 0 {
+		return urlVideoBps, urlPlaySessionID, "", false
+	}
+
+	if urlPlaySessionID != "" && p.basePlaySessionID != urlPlaySessionID {
+		p.basePlaySessionID = urlPlaySessionID
+		p.activePlaySessionID = urlPlaySessionID
+		p.activeVideoBps = urlVideoBps
+		p.activeAudioBps = urlAudioBps
+		p.originalTotalBps = urlVideoBps + urlAudioBps
+		p.switchSeq = 0
+	}
+
+	urlTotal := urlVideoBps + urlAudioBps
+	if p.originalTotalBps == 0 || urlTotal > p.originalTotalBps {
+		p.originalTotalBps = urlTotal
+	}
+	if p.activeVideoBps == 0 {
+		p.activeVideoBps = urlVideoBps
+		p.activeAudioBps = urlAudioBps
+	}
+	if p.activePlaySessionID == "" {
+		p.activePlaySessionID = urlPlaySessionID
+	}
+
+	desiredTotal := min64(p.allocated, p.originalTotalBps)
+	desiredVideo := desiredTotal - urlAudioBps
+	if desiredVideo < f.m.cfg.MinBitrateBps {
+		desiredVideo = min64(urlVideoBps, f.m.cfg.MinBitrateBps)
+	}
+
+	activeTotal := p.activeVideoBps + urlAudioBps
+	now := time.Now()
+
+	downgrade := activeTotal > p.allocated*108/100
+	upgrade := desiredTotal > activeTotal*120/100 && now.Sub(p.lastSwitchAt) > 8*time.Second
+	if (downgrade || upgrade) && now.Sub(p.lastSwitchAt) > 4*time.Second {
+		oldPS := p.activePlaySessionID
+		p.switchSeq++
+		if p.basePlaySessionID != "" {
+			p.activePlaySessionID = fmt.Sprintf("%s_jp%d", p.basePlaySessionID, p.switchSeq)
+		}
+		p.activeVideoBps = desiredVideo
+		p.activeAudioBps = urlAudioBps
+		p.lastSwitchAt = now
+		p.burstUntil = now.Add(time.Duration(f.m.cfg.SeekBorrowSeconds) * time.Second)
+		p.burstReason = "bitrate-switch"
+		f.m.reallocate()
+		return desiredVideo, p.activePlaySessionID, oldPS, true
+	}
+
+	return p.activeVideoBps, p.activePlaySessionID, "", false
+}
+
+// ActivePlaySessionID returns any switched PlaySessionId currently active for clientID.
+func (m *BandwidthManager) ActivePlaySessionID(clientID string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.pipeForClient(clientID)
+	if p == nil || p.activePlaySessionID == "" || p.activePlaySessionID == p.basePlaySessionID {
+		return ""
+	}
+	return p.activePlaySessionID
+}
+
+// PrepareUpstream checks if another client on this shared pipe already owns a live
+// Jellyfin transcode session. If so, it merges the owner's session parameters with
+// the current segment's runtimeTicks/actualSegmentLengthTicks so Jellyfin serves the
+// segment from the existing ffmpeg process instead of spawning a second transcode.
+func (f *Fetch) PrepareUpstream(clientID string, reqQuery url.Values) (string, map[string]string, bool) {
+	if f == nil || f.m == nil {
+		return "", nil, false
+	}
+	f.m.mu.Lock()
+	defer f.m.mu.Unlock()
+	p := f.m.pipes[f.key]
+	if p == nil || p.ownerClient == "" || p.ownerClient == clientID || len(p.ownerQuery) == 0 {
+		return "", nil, false
+	}
+	if !strings.EqualFold(p.ownerQuery.Get("SegmentContainer"), reqQuery.Get("SegmentContainer")) ||
+		!strings.EqualFold(p.ownerQuery.Get("VideoCodec"), reqQuery.Get("VideoCodec")) {
+		return "", nil, false
+	}
+	merged := make(url.Values, len(p.ownerQuery)+2)
+	for k, vals := range p.ownerQuery {
+		merged[k] = append([]string(nil), vals...)
+	}
+	for _, k := range []string{"runtimeTicks", "RuntimeTicks", "actualSegmentLengthTicks", "ActualSegmentLengthTicks"} {
+		merged.Del(k)
+		if v := reqQuery.Get(k); v != "" {
+			merged.Set(k, v)
+		}
+	}
+	hdrs := make(map[string]string, len(p.ownerHeaders))
+	for k, v := range p.ownerHeaders {
+		hdrs[k] = v
+	}
+	return merged.Encode(), hdrs, true
+}
+
+// RecordUpstream records the working upstream query and auth headers of the pipe's
+// primary client (or promotes a new owner when PromoteOwner is true).
+func (f *Fetch) RecordUpstream(clientID string, reqQuery url.Values, reqHeaders http.Header, promote bool) {
+	if f == nil || f.m == nil || clientID == "" || len(reqQuery) == 0 {
+		return
+	}
+	f.m.mu.Lock()
+	defer f.m.mu.Unlock()
+	p := f.m.pipes[f.key]
+	if p == nil {
+		return
+	}
+	if !promote && p.ownerClient != "" && p.ownerClient != clientID {
+		return
+	}
+	p.ownerClient = clientID
+	p.ownerQuery = make(url.Values, len(reqQuery))
+	for k, vals := range reqQuery {
+		p.ownerQuery[k] = append([]string(nil), vals...)
+	}
+	p.ownerHeaders = make(map[string]string, 4)
+	for _, k := range []string{"Authorization", "X-Emby-Token", "X-Emby-Authorization"} {
+		if v := reqHeaders.Get(k); v != "" {
+			p.ownerHeaders[k] = v
+		}
+	}
 }
 
 // Account records n bytes genuinely taken from the home upstream.
@@ -565,6 +746,7 @@ func (f *Fetch) UpdateRate() {
 		return
 	}
 	f.m.mu.Lock()
+	f.m.cleanup(time.Now())
 	f.m.reallocate()
 	f.m.mu.Unlock()
 }
@@ -609,6 +791,11 @@ func (m *BandwidthManager) Release(clientID string) {
 	}
 	if p := m.pipes[key]; p != nil {
 		delete(p.clients, clientID)
+		if p.ownerClient == clientID {
+			p.ownerClient = ""
+			p.ownerQuery = nil
+			p.ownerHeaders = nil
+		}
 		p.lastSeen = time.Now()
 		if len(p.clients) == 0 {
 			m.dropPipeLocked(p)
@@ -629,7 +816,14 @@ func (m *BandwidthManager) dropPipeLocked(p *pipe) {
 
 func (m *BandwidthManager) cleanup(now time.Time) {
 	for _, p := range m.pipes {
-		if now.Sub(p.lastSeen) > idleTimeout && p.pulling == 0 {
+		if p.pulling > 0 {
+			continue
+		}
+		if p.bytesPulled == 0 && now.Sub(p.lastSeen) > unstartedTimeout {
+			m.dropPipeLocked(p)
+			continue
+		}
+		if now.Sub(p.lastSeen) > idleTimeout {
 			m.dropPipeLocked(p)
 		}
 	}
@@ -777,13 +971,23 @@ func (m *BandwidthManager) computePullsLocked(capacity int64, pipes []*pipe) {
 
 	if len(burst) == 0 {
 		total := int64(0)
+		pullingTotal := int64(0)
+		pullingPipes := 0
 		for _, p := range pipes {
-			total += p.allocated
+			w := max64(p.allocated, m.cfg.MinBitrateBps)
+			total += w
+			if p.pulling > 0 {
+				pullingTotal += w
+				pullingPipes++
+			}
 		}
 		for _, p := range pipes {
-			rate := int64(float64(p.allocated) * steadyCatchUp)
-			if total > capacity && total > 0 {
-				rate = capacity * p.allocated / total
+			w := max64(p.allocated, m.cfg.MinBitrateBps)
+			rate := capacity
+			if pullingPipes > 0 && p.pulling > 0 && pullingTotal > 0 {
+				rate = capacity * w / pullingTotal
+			} else if total > 0 {
+				rate = capacity * w / total
 			}
 			p.pull = clampRate(rate, capacity)
 			if p.bucket != nil {
@@ -808,21 +1012,21 @@ func (m *BandwidthManager) computePullsLocked(capacity int64, pipes []*pipe) {
 	for _, p := range burst {
 		p.pull = clampRate(perBurst, capacity)
 		if p.bucket != nil {
-			p.bucket.SetRate(p.pull)
+			p.bucket.SetRate(max64(p.pull, p.allocated))
 		}
 	}
 	for _, p := range steady {
 		if rest <= 0 {
 			p.pull = clampRate(capacity/20, capacity) // never fully starve a playing stream
 			if p.bucket != nil {
-				p.bucket.SetRate(p.pull)
+				p.bucket.SetRate(max64(p.pull, p.allocated))
 			}
 			continue
 		}
 		share := rest * max64(p.allocated, m.cfg.MinBitrateBps) / totalSteady
 		p.pull = clampRate(share, capacity)
 		if p.bucket != nil {
-			p.bucket.SetRate(p.pull)
+			p.bucket.SetRate(max64(p.pull, p.allocated))
 		}
 	}
 }

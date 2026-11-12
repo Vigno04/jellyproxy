@@ -136,6 +136,27 @@ func TestBuildCacheKeyMedia(t *testing.T) {
 	if key1 != "media:/videos/item123/hls1/main/5.m4s?maxBitrate=8000000&videoCodec=h264" {
 		t.Errorf("Unexpected normalized media cache key: %q", key1)
 	}
+
+	// Verify real-world Dune URLs from two different devices (one with SubtitleMethod=Encode
+	// but no SubtitleStreamIndex, different bitrates, tags, and session IDs) map to the exact same key.
+	duneDev1 := &http.Request{
+		URL: &url.URL{
+			Path:     "/videos/c902ba72-84ba-376a-9778-d9000f04917c/hls1/main/0.ts",
+			RawQuery: "DeviceId=TW96aWxsYS81LjA1&MediaSourceId=c902ba7284ba376a9778d9000f04917c&VideoCodec=hevc,h264&AudioCodec=aac&AudioStreamIndex=2&VideoBitrate=7214000&AudioBitrate=1536000&MaxFramerate=23.976025&PlaySessionId=b4445fe5862e4914a51f9be9fd8be704&api_key=fe21aa8082334433818af2acfd9f4a86&SubtitleMethod=Encode&TranscodingMaxAudioChannels=8&RequireAvc=false&Tag=8f06c536bb57c7cd14be0b8bb2804691&SegmentContainer=ts&MinSegments=2&BreakOnNonKeyFrames=True&hevc-level=153&hevc-videobitdepth=10&hevc-profile=main10&aac-audiochannels=8&TranscodeReasons=ContainerBitrateExceedsLimit&runtimeTicks=0&actualSegmentLengthTicks=30000000",
+		},
+	}
+	duneDev2 := &http.Request{
+		URL: &url.URL{
+			Path:     "/videos/c902ba72-84ba-376a-9778-d9000f04917c/hls1/main/0.ts",
+			RawQuery: "DeviceId=TW96aWxsYS81LjA2&MediaSourceId=c902ba7284ba376a9778d9000f04917c&VideoCodec=hevc,h264&AudioCodec=aac&AudioStreamIndex=2&VideoBitrate=6656000&AudioBitrate=1536000&MaxFramerate=23.976025&PlaySessionId=775f9550131e409d9d8bbcb90c40bf49&api_key=2e5d06526d274e7e9ff4e95c513269c0&TranscodingMaxAudioChannels=6&RequireAvc=false&Tag=8f06c536bb57c7cd14be0b8bb2804691&SegmentContainer=ts&MinSegments=1&BreakOnNonKeyFrames=True&hevc-level=153&hevc-videobitdepth=10&hevc-profile=main10&aac-audiochannels=6&TranscodeReasons=ContainerBitrateExceedsLimit&runtimeTicks=0&actualSegmentLengthTicks=30000000",
+		},
+	}
+	if k1, k2 := buildCacheKey(duneDev1, cache.CategoryMedia), buildCacheKey(duneDev2, cache.CategoryMedia); k1 != k2 {
+		t.Errorf("Dune device 1 and device 2 keys differed:\n  k1=%s\n  k2=%s", k1, k2)
+	}
+	if isDirectStream("/Videos/c902ba72-84ba-376a-9778-d9000f04917c/c902ba7284ba376a9778d9000f04917c/Subtitles/7/0/Stream.subrip") {
+		t.Error("Subtitle stream must not be classified as DirectStream")
+	}
 }
 
 func TestRangeRequestMediaCaching(t *testing.T) {
