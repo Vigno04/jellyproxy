@@ -15,6 +15,10 @@ var mediaSegmentExtensions = []string{
 	".m4s", ".ts", ".mp4", ".m4a", ".aac", ".vtt", ".bif",
 }
 
+var subtitleExtensions = []string{
+	".vtt", ".srt", ".subrip", ".ass", ".ssa", ".ttml", ".sub", ".smi",
+}
+
 var cachedResponseHeaders = []string{
 	"Content-Type",
 	"Cache-Control",
@@ -50,7 +54,16 @@ func classifyCacheableRequest(rawPath string) (category string, itemID string, o
 		return cache.CategoryImages, extractItemIDFromImagePath(rawPath), true
 	}
 
-	// 3. Media Segments (HLS fMP4 / TS / init.mp4 / subtitles / trickplay)
+	// 3. External subtitle streams (/Videos/{id}/{source}/Subtitles/{idx}/.../Stream.subrip)
+	if strings.Contains(lowerPath, "/subtitles/") {
+		for _, ext := range subtitleExtensions {
+			if strings.HasSuffix(lowerPath, ext) {
+				return cache.CategoryStatic, extractItemIDFromMediaPath(rawPath), true
+			}
+		}
+	}
+
+	// 4. Media Segments (HLS fMP4 / TS / init.mp4 / subtitles / trickplay)
 	// Never cache dynamic playlists (.m3u8, .mpd)
 	if !strings.HasSuffix(lowerPath, ".m3u8") && !strings.HasSuffix(lowerPath, ".mpd") {
 		if strings.Contains(lowerPath, "/videos/") || strings.Contains(lowerPath, "/audio/") ||
@@ -141,7 +154,7 @@ func isWebSocket(req *http.Request) bool {
 // they do consume home upload, so they are metered and paced.
 func isDirectStream(rawPath string) bool {
 	p := strings.ToLower(rawPath)
-	if strings.HasSuffix(p, ".m3u8") || strings.HasSuffix(p, ".mpd") {
+	if strings.HasSuffix(p, ".m3u8") || strings.HasSuffix(p, ".mpd") || strings.Contains(p, "/subtitles/") {
 		return false
 	}
 	switch {

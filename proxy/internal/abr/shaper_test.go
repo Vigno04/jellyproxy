@@ -221,3 +221,71 @@ func TestNormalizeCodec(t *testing.T) {
 		}
 	}
 }
+
+func TestOnTheFlyBitrateSwitchDerivesPlaySessionID(t *testing.T) {
+	m := newMgr(18)
+
+	d1 := m.Negotiate(Request{
+		ClientID:     "c1",
+		ItemID:       "dune",
+		RequestedBps: 80 * mb,
+		ClientCodecs: []string{"hevc", "h264"},
+	})
+	if d1.Codec != CodecHEVC || d1.AllocatedBps != 18*mb {
+		t.Fatalf("expected c1 to start with hevc @ 18M, got codec=%s alloc=%d", d1.Codec, d1.AllocatedBps)
+	}
+
+	f1 := m.BeginFetchMode("c1", "dune", false)
+	vb, psid, oldPS, restart := f1.CheckBitrateSwitch(14_360_000, 640_000, "ps1")
+	f1.End()
+	if restart || vb != 14_360_000 || psid != "ps1" || oldPS != "" {
+		t.Fatalf("unexpected initial switch state: vb=%d psid=%s old=%s restart=%v", vb, psid, oldPS, restart)
+	}
+
+	// Client 2 joins and only supports h264.
+	d2 := m.Negotiate(Request{
+		ClientID:     "c2",
+		ItemID:       "dune",
+		RequestedBps: 8_750_000,
+		ClientCodecs: []string{"h264"},
+	})
+	if d2.Codec != CodecH264 || d2.Shared {
+		t.Fatalf("expected c2 to get separate h264 pipe, got codec=%s shared=%v", d2.Codec, d2.Shared)
+	}
+
+	f2 := m.BeginFetchMode("c1", "dune", false)
+	vb, psid, oldPS, restart = f2.CheckBitrateSwitch(14_360_000, 640_000, "ps1")
+	f2.End()
+	if !restart || vb != 8_610_000 || psid != "ps1_jp1" || oldPS != "ps1" {
+		t.Fatalf("expected downgrade to 8610000 with derived PlaySessionId ps1_jp1, got vb=%d psid=%s old=%s restart=%v",
+			vb, psid, oldPS, restart)
+	}
+	if got := m.ActivePlaySessionID("c1"); got != "ps1_jp1" {
+		t.Fatalf("expected ActivePlaySessionID=ps1_jp1, got %q", got)
+	}
+
+	// Next segment (7.mp4) keeps the derived PlaySessionId without restarting again.
+	f3 := m.BeginFetchMode("c1", "dune", false)
+	vb2, psid2, oldPS2, restart2 := f3.CheckBitrateSwitch(14_360_000, 640_000, "ps1")
+	f3.End()
+	if restart2 || vb2 != 8_610_000 || psid2 != "ps1_jp1" || oldPS2 != "" {
+		t.Fatalf("expected steady 8610000 on ps1_jp1, got vb=%d psid=%s old=%s restart=%v",
+			vb2, psid2, oldPS2, restart2)
+	}
+
+	// Client 2 stops watching; after cooldown, Client 1 auto-upgrades back to 14360000 on ps1_jp2.
+	m.Release("c2")
+	m.mu.Lock()
+	for _, p := range m.pipes {
+		p.lastSwitchAt = time.Now().Add(-10 * time.Second)
+	}
+	m.mu.Unlock()
+
+	f4 := m.BeginFetchMode("c1", "dune", false)
+	vb3, psid3, oldPS3, restart3 := f4.CheckBitrateSwitch(14_360_000, 640_000, "ps1")
+	f4.End()
+	if !restart3 || vb3 != 14_360_000 || psid3 != "ps1_jp2" || oldPS3 != "ps1_jp1" {
+		t.Fatalf("expected auto-upgrade to 14360000 on ps1_jp2 killing ps1_jp1, got vb=%d psid=%s old=%s restart=%v",
+			vb3, psid3, oldPS3, restart3)
+	}
+}

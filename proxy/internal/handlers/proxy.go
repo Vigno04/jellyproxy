@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -124,12 +127,30 @@ func NewReverseProxyHandler(cfg *config.Config, storage *cache.StorageManager) (
 
 // ServeHTTP inspects requests for cache eligibility and either serves from cache, tees from upstream, or passes through
 func (h *ReverseProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.abr != nil && r.Method == http.MethodPost && strings.HasSuffix(strings.ToLower(r.URL.Path), "/playbackinfo") {
+	lowerReqPath := strings.ToLower(r.URL.Path)
+	if h.abr != nil && r.Method == http.MethodPost && strings.HasSuffix(lowerReqPath, "/playbackinfo") {
 		h.servePlaybackInfo(w, r)
 		return
 	}
+	if h.abr != nil && ((r.Method == http.MethodDelete && strings.HasSuffix(lowerReqPath, "/videos/activeencodings")) ||
+		(r.Method == http.MethodPost && strings.HasSuffix(lowerReqPath, "/sessions/playing/stopped"))) {
+		clientID, _ := clientIdentity(r)
+		if clientID == "" {
+			clientID = r.URL.Query().Get("deviceId")
+		}
+		if clientID != "" {
+			if activePSID := h.abr.ActivePlaySessionID(clientID); activePSID != "" {
+				h.stopUpstreamEncoding(r, r.URL.Query(), activePSID)
+			}
+			h.abr.Release(clientID)
+		}
+	}
 
 	if r.Method == http.MethodGet && !isWebSocket(r) {
+		if strings.HasSuffix(strings.ToLower(r.URL.Path), "/bitratetest") {
+			h.serveBitrateTest(w, r)
+			return
+		}
 		if h.storage != nil {
 			if category, itemID, cacheable := classifyCacheableRequest(r.URL.Path); cacheable {
 				if category == cache.CategoryMedia {
@@ -306,16 +327,75 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 	outReq.Header.Del("If-Modified-Since")
 
 	var fetch *abr.Fetch
+	sharedTry := false
+	restartedEncoding := false
+	var activeQuery url.Values
+	lowerPath := strings.ToLower(r.URL.Path)
+	isInitSeg := strings.HasSuffix(lowerPath, "/-1.mp4") || strings.HasSuffix(lowerPath, "/init.mp4")
 	if category == cache.CategoryMedia {
 		atomic.AddInt32(&h.activeLiveUpstreamCount, 1)
 		defer atomic.AddInt32(&h.activeLiveUpstreamCount, -1)
 		if h.abr != nil {
 			fetch = h.abr.BeginFetchMode(clientID, itemID, false)
 			defer fetch.End()
+			rq := r.URL.Query()
+			if mergedQuery, ownerHdrs, ok := fetch.PrepareUpstream(clientID, rq); ok {
+				h.applyUpstreamQuery(outReq, mergedQuery)
+				for k, v := range ownerHdrs {
+					outReq.Header.Set(k, v)
+				}
+				sharedTry = true
+			} else if !isInitSeg {
+				urlVideoBps, _ := strconv.ParseInt(rq.Get("VideoBitrate"), 10, 64)
+				urlAudioBps, _ := strconv.ParseInt(rq.Get("AudioBitrate"), 10, 64)
+				urlPlaySessionID := rq.Get("PlaySessionId")
+				if urlVideoBps > 0 {
+					targetVideoBps, activePSID, oldPSID, restart := fetch.CheckBitrateSwitch(urlVideoBps, urlAudioBps, urlPlaySessionID)
+					if restart {
+						log.Printf("[JellyProxy] On-the-fly bitrate switch for item=%s client=%s (%s): VideoBitrate %d -> %d PlaySessionId %s -> %s (%s)",
+							itemID, clientID, clientName, urlVideoBps, targetVideoBps, oldPSID, activePSID, r.URL.Path)
+						h.stopUpstreamEncoding(r, rq, oldPSID)
+						restartedEncoding = true
+					}
+					changed := false
+					if targetVideoBps > 0 && targetVideoBps != urlVideoBps {
+						rq.Set("VideoBitrate", strconv.FormatInt(targetVideoBps, 10))
+						changed = true
+					}
+					if activePSID != "" && activePSID != urlPlaySessionID {
+						rq.Set("PlaySessionId", activePSID)
+						changed = true
+					}
+					if changed {
+						h.applyUpstreamQuery(outReq, rq.Encode())
+						activeQuery = rq
+					}
+				}
+			}
 		}
 	}
 
+	isSub := strings.Contains(lowerPath, "/subtitles/")
+	if isSub {
+		subCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		outReq = outReq.WithContext(subCtx)
+	}
+
 	resp, err := h.httpClient.Do(outReq)
+	if err == nil && resp.StatusCode != http.StatusOK && sharedTry {
+		_ = resp.Body.Close()
+		if retryReq, rerr := h.buildUpstreamRequest(r); rerr == nil {
+			retryReq.Header.Del("Accept-Encoding")
+			retryReq.Header.Del("If-None-Match")
+			retryReq.Header.Del("If-Modified-Since")
+			sharedTry = false
+			resp, err = h.httpClient.Do(retryReq)
+			if err == nil && resp.StatusCode == http.StatusOK && fetch != nil {
+				fetch.RecordUpstream(clientID, r.URL.Query(), r.Header, true)
+			}
+		}
+	}
 	if err != nil {
 		log.Printf("[JellyProxy] Upstream error for %s %s: %v", r.Method, r.URL.Path, err)
 		http.Error(w, "JellyProxy: Upstream Jellyfin unreachable", http.StatusBadGateway)
@@ -324,6 +404,9 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 	defer resp.Body.Close()
 
 	for k, vals := range resp.Header {
+		if restartedEncoding && strings.EqualFold(k, "Content-Length") {
+			continue
+		}
 		for _, v := range vals {
 			w.Header().Add(k, v)
 		}
@@ -336,12 +419,26 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 		_, _ = io.Copy(w, resp.Body)
 		return
 	}
+	if fetch != nil && !sharedTry {
+		recQ := r.URL.Query()
+		if activeQuery != nil {
+			recQ = activeQuery
+		}
+		fetch.RecordUpstream(clientID, recQ, r.Header, false)
+	}
+
+	var bodyReader io.Reader = resp.Body
+	if restartedEncoding && !isInitSeg && (strings.HasSuffix(lowerPath, ".mp4") || strings.HasSuffix(lowerPath, ".m4s")) {
+		if initBytes := h.fetchInitSegment(r, outReq.URL.RawQuery); len(initBytes) > 0 {
+			bodyReader = io.MultiReader(bytes.NewReader(initBytes), resp.Body)
+		}
+	}
 
 	tmpFile, err := h.storage.CreateTempFile()
 	if err != nil {
 		log.Printf("[JellyProxy] Warning: failed to create temp cache file: %v", err)
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		_, _ = io.Copy(w, bodyReader)
 		return
 	}
 	tmpPath := tmpFile.Name()
@@ -350,7 +447,9 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 
 	// Stream to the client while teeing to disk. Only media chunks are paced and
 	// accounted: they are the traffic that consumes the home upload.
-	copyErr := h.teeStream(r.Context(), w, tmpFile, resp.Body, category == cache.CategoryMedia, fetch, itemID, clientID, clientName)
+	// For subtitle extractions, continue writing to disk even if the client disconnects
+	// so the next retry is an instant cache HIT instead of restarting ffmpeg on a 30GB MKV.
+	copyErr := h.teeStream(r.Context(), w, tmpFile, bodyReader, category == cache.CategoryMedia, isSub, fetch, itemID, clientID, clientName)
 	closeErr := tmpFile.Close()
 	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(tmpPath)
@@ -382,9 +481,10 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 
 // teeStream copies src to both the client and the cache file in paced chunks.
 func (h *ReverseProxyHandler) teeStream(ctx context.Context, client io.Writer, disk io.Writer, src io.Reader,
-	media bool, fetch *abr.Fetch, itemID, clientID, clientName string) error {
+	media bool, keepOnClientAbort bool, fetch *abr.Fetch, itemID, clientID, clientName string) error {
 	flusher, _ := client.(http.Flusher)
 	buf := make([]byte, streamChunk)
+	clientGone := false
 	for {
 		n, rerr := src.Read(buf)
 		if n > 0 {
@@ -394,14 +494,20 @@ func (h *ReverseProxyHandler) teeStream(ctx context.Context, client io.Writer, d
 			if _, err := disk.Write(buf[:n]); err != nil {
 				return err
 			}
-			if _, err := client.Write(buf[:n]); err != nil {
-				return err
-			}
-			if media {
-				h.hub.Sent(clientID, clientName, itemID, n, false)
-			}
-			if flusher != nil {
-				flusher.Flush()
+			if !clientGone {
+				if _, err := client.Write(buf[:n]); err != nil {
+					if !keepOnClientAbort {
+						return err
+					}
+					clientGone = true
+				} else {
+					if media {
+						h.hub.Sent(clientID, clientName, itemID, n, false)
+					}
+					if flusher != nil {
+						flusher.Flush()
+					}
+				}
 			}
 		}
 		if rerr == io.EOF {
@@ -410,6 +516,152 @@ func (h *ReverseProxyHandler) teeStream(ctx context.Context, client io.Writer, d
 		if rerr != nil {
 			return rerr
 		}
+	}
+}
+
+func (h *ReverseProxyHandler) applyUpstreamQuery(outReq *http.Request, rawQuery string) {
+	targetQuery := h.upstreamURL.RawQuery
+	if targetQuery == "" || rawQuery == "" {
+		outReq.URL.RawQuery = targetQuery + rawQuery
+	} else {
+		outReq.URL.RawQuery = targetQuery + "&" + rawQuery
+	}
+}
+
+// stopUpstreamEncoding calls DELETE /Videos/ActiveEncodings on Jellyfin so an
+// in-flight ffmpeg process is cleanly stopped before restarting at a new bitrate.
+func (h *ReverseProxyHandler) stopUpstreamEncoding(r *http.Request, rq url.Values, playSessionID string) {
+	if playSessionID == "" {
+		playSessionID = rq.Get("PlaySessionId")
+		if playSessionID == "" {
+			playSessionID = rq.Get("playSessionId")
+		}
+	}
+	deviceID := rq.Get("DeviceId")
+	if deviceID == "" {
+		deviceID = rq.Get("deviceId")
+	}
+	if deviceID == "" {
+		deviceID, _ = clientIdentity(r)
+	}
+	if playSessionID == "" || deviceID == "" {
+		return
+	}
+	apiKey := rq.Get("ApiKey")
+	if apiKey == "" {
+		apiKey = rq.Get("api_key")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	delURL := *h.upstreamURL
+	delURL.Path = singleJoiningSlash(h.upstreamURL.Path, "/Videos/ActiveEncodings")
+	q := url.Values{}
+	q.Set("deviceId", deviceID)
+	q.Set("playSessionId", playSessionID)
+	if apiKey != "" {
+		q.Set("ApiKey", apiKey)
+	}
+	delURL.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, delURL.String(), nil)
+	if err != nil {
+		return
+	}
+	h.copyUpstreamAuthAndForwardHeaders(r, req, apiKey)
+	if resp, err := h.httpClient.Do(req); err == nil {
+		_ = resp.Body.Close()
+	}
+}
+
+// fetchInitSegment retrieves the fMP4 initialization segment (-1.mp4) written alongside
+// a newly restarted ffmpeg segment so MSE updates its moov/hvcC/avcC parameters inline.
+// Keeping the active segment's runtimeTicks and PlaySessionId ensures Jellyfin serves the
+// freshly written -1.mp4 from disk instead of restarting ffmpeg at t=0.
+func (h *ReverseProxyHandler) fetchInitSegment(r *http.Request, rawQuery string) []byte {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	initURL := *h.upstreamURL
+	initURL.Path = singleJoiningSlash(h.upstreamURL.Path, path.Join(path.Dir(r.URL.Path), "-1.mp4"))
+	initURL.RawQuery = rawQuery
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, initURL.String(), nil)
+	if err != nil {
+		return nil
+	}
+	var apiKey string
+	if q, err := url.ParseQuery(rawQuery); err == nil {
+		apiKey = q.Get("ApiKey")
+		if apiKey == "" {
+			apiKey = q.Get("api_key")
+		}
+	}
+	h.copyUpstreamAuthAndForwardHeaders(r, req, apiKey)
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	return data
+}
+
+func (h *ReverseProxyHandler) copyUpstreamAuthAndForwardHeaders(r *http.Request, req *http.Request, apiKey string) {
+	if h.cfg.UpstreamHost != "" {
+		req.Host = h.cfg.UpstreamHost
+	} else {
+		req.Host = h.upstreamURL.Host
+	}
+	for _, k := range []string{"Authorization", "X-Emby-Token", "X-Emby-Authorization", "X-Forwarded-For", "X-Forwarded-Proto"} {
+		if v := r.Header.Get(k); v != "" {
+			req.Header.Set(k, v)
+		}
+	}
+	if req.Header.Get("X-Forwarded-Proto") == "" {
+		if r.TLS != nil || strings.EqualFold(h.upstreamURL.Scheme, "https") {
+			req.Header.Set("X-Forwarded-Proto", "https")
+		} else {
+			req.Header.Set("X-Forwarded-Proto", "http")
+		}
+	}
+	if apiKey != "" {
+		if req.Header.Get("Authorization") == "" {
+			req.Header.Set("Authorization", `MediaBrowser Token="`+apiKey+`"`)
+		}
+		if req.Header.Get("X-Emby-Token") == "" {
+			req.Header.Set("X-Emby-Token", apiKey)
+		}
+	}
+}
+
+// serveBitrateTest handles GET /System/BitrateTest directly on the VPS so client
+// auto-bitrate probes cost 0 home upload and never mismeasure tunnel jitter.
+func (h *ReverseProxyHandler) serveBitrateTest(w http.ResponseWriter, r *http.Request) {
+	size, _ := strconv.Atoi(r.URL.Query().Get("Size"))
+	if size <= 0 {
+		size = 500_000
+	}
+	if size > 10_000_000 {
+		size = 10_000_000
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(size))
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	buf := make([]byte, 32*1024)
+	for remaining := size; remaining > 0; {
+		n := len(buf)
+		if remaining < n {
+			n = remaining
+		}
+		if _, err := w.Write(buf[:n]); err != nil {
+			return
+		}
+		remaining -= n
 	}
 }
 

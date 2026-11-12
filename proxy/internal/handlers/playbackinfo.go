@@ -77,23 +77,50 @@ func videoCodecs(body map[string]any) []string {
 
 // restrictTranscodeCodec pins the transcode to the codec the shaper converged on, so
 // clients with overlapping support are fed from one encoded stream (spec cases 5, 7).
+// It also normalizes HLS audio to AAC and H.264 HLS container to MPEG-TS (.ts) so
+// different client types (e.g. Android and Firefox) request identical segment files.
 func restrictTranscodeCodec(body map[string]any, codec string) {
 	if codec == "" || codec == abr.CodecUnknown {
 		return
 	}
 	profile, _ := body["DeviceProfile"].(map[string]any)
 	list, _ := profile["TranscodingProfiles"].([]any)
+	if len(list) == 0 {
+		return
+	}
+	var matchedVideo, otherProfiles, nonVideo []any
 	for _, e := range list {
 		p, _ := e.(map[string]any)
 		if asString(p["Type"]) != "Video" {
+			nonVideo = append(nonVideo, e)
 			continue
 		}
-		for _, c := range strings.Split(asString(p["VideoCodec"]), ",") {
-			if abr.NormalizeCodec(c) == codec {
-				p["VideoCodec"] = strings.TrimSpace(c)
+		for _, ac := range strings.Split(asString(p["AudioCodec"]), ",") {
+			if strings.EqualFold(strings.TrimSpace(ac), "aac") {
+				p["AudioCodec"] = "aac"
 				break
 			}
 		}
+		found := false
+		for _, c := range strings.Split(asString(p["VideoCodec"]), ",") {
+			if abr.NormalizeCodec(c) == codec {
+				p["VideoCodec"] = strings.TrimSpace(c)
+				found = true
+				break
+			}
+		}
+		if found {
+			proto := strings.ToLower(asString(p["Protocol"]))
+			if (proto == "hls" || proto == "") && codec == abr.CodecH264 {
+				p["Container"] = "ts"
+			}
+			matchedVideo = append(matchedVideo, p)
+		} else {
+			otherProfiles = append(otherProfiles, p)
+		}
+	}
+	if len(matchedVideo) > 0 {
+		profile["TranscodingProfiles"] = append(matchedVideo, nonVideo...)
 	}
 }
 
@@ -140,7 +167,13 @@ func burnsInSubtitles(resp []byte) bool {
 		return false
 	}
 	for _, ms := range v.MediaSources {
-		if strings.Contains(ms.TranscodingURL, "SubtitleMethod=Encode") {
+		parsed, err := url.Parse(ms.TranscodingURL)
+		if err != nil {
+			continue
+		}
+		q := parsed.Query()
+		subIdx := strings.TrimSpace(q.Get("SubtitleStreamIndex"))
+		if strings.EqualFold(q.Get("SubtitleMethod"), "Encode") && subIdx != "" && subIdx != "-1" {
 			return true
 		}
 	}
@@ -246,9 +279,17 @@ func (h *ReverseProxyHandler) reconcilePlaybackResponse(out []byte, req abr.Requ
 					modified = true
 				}
 			}
-			if !reconciled {
-				if parsed, err := url.Parse(trURL); err == nil {
-					vq := parsed.Query()
+			if parsed, err := url.Parse(trURL); err == nil {
+				vq := parsed.Query()
+				subIdx := strings.TrimSpace(vq.Get("SubtitleStreamIndex"))
+				burnIn := strings.EqualFold(vq.Get("SubtitleMethod"), "Encode") && subIdx != "" && subIdx != "-1"
+				if !burnIn && vq.Get("SubtitleMethod") != "" {
+					vq.Del("SubtitleMethod")
+					parsed.RawQuery = vq.Encode()
+					ms["TranscodingUrl"] = parsed.String()
+					modified = true
+				}
+				if !reconciled {
 					if vc := vq.Get("VideoCodec"); vc != "" && !strings.EqualFold(vc, "copy") {
 						req.Codec = abr.NormalizeCodec(vc)
 						req.ClientCodecs = nil
@@ -256,19 +297,19 @@ func (h *ReverseProxyHandler) reconcilePlaybackResponse(out []byte, req abr.Requ
 					if ai := vq.Get("AudioStreamIndex"); ai != "" {
 						req.AudioIndex = ai
 					}
-					if si := vq.Get("SubtitleStreamIndex"); si != "" {
-						req.SubIndex = si
+					if subIdx != "" && subIdx != "-1" {
+						req.SubIndex = subIdx
 					}
 					if msID := vq.Get("MediaSourceId"); msID != "" {
 						req.SourceID = msID
 					}
-					if strings.EqualFold(vq.Get("SubtitleMethod"), "Encode") {
-						req.SubBurnIn = true
-					}
+					req.SubBurnIn = burnIn
+					req.DirectPlay = false
+					dec := h.abr.Negotiate(req)
+					log.Printf("[JellyProxy] PlaybackInfo client=%s (%s) item=%s req=%d alloc=%d codec=%s shared=%v url=%s",
+						req.ClientID, req.ClientName, req.ItemID, req.RequestedBps, dec.AllocatedBps, dec.Codec, dec.Shared, asString(ms["TranscodingUrl"]))
+					reconciled = true
 				}
-				req.DirectPlay = false
-				h.abr.Negotiate(req)
-				reconciled = true
 			}
 		} else if !reconciled && (ms["SupportsDirectPlay"] == true || ms["SupportsDirectStream"] == true) {
 			if br := asInt64(ms["Bitrate"]); br > 0 && br < req.RequestedBps {
