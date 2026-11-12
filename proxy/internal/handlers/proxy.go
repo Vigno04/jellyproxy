@@ -289,8 +289,11 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 	}
 	defer h.coalescer.Finish(keyHash, call)
 
-	// Cache MISS: if client sent a Range header on non-segment request, proxy directly to prevent caching partial fragments
-	if r.Header.Get("Range") != "" && category != cache.CategoryMedia {
+	// Cache MISS: if client sent a Range header on non-media request, proxy directly to prevent caching partial fragments.
+	// For media requests with a Range header, strip Range toward upstream so we fetch and cache the full object,
+	// then serve the requested byte range from the cached file via http.ServeContent.
+	isMediaRange := r.Header.Get("Range") != "" && category == cache.CategoryMedia
+	if r.Header.Get("Range") != "" && !isMediaRange {
 		h.proxy.ServeHTTP(w, r)
 		return
 	}
@@ -304,6 +307,10 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 	outReq.Header.Del("Accept-Encoding")
 	outReq.Header.Del("If-None-Match")
 	outReq.Header.Del("If-Modified-Since")
+	if isMediaRange {
+		outReq.Header.Del("Range")
+		outReq.Header.Del("If-Range")
+	}
 
 	var fetch *abr.Fetch
 	if category == cache.CategoryMedia {
@@ -323,37 +330,16 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 	}
 	defer resp.Body.Close()
 
-	for k, vals := range resp.Header {
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
-	}
-	w.Header().Set("X-JellyProxy-Cache", "MISS")
-
 	// Only cache 200 OK responses
 	if resp.StatusCode != http.StatusOK {
+		for k, vals := range resp.Header {
+			for _, v := range vals {
+				w.Header().Add(k, v)
+			}
+		}
+		w.Header().Set("X-JellyProxy-Cache", "MISS")
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
-		return
-	}
-
-	tmpFile, err := h.storage.CreateTempFile()
-	if err != nil {
-		log.Printf("[JellyProxy] Warning: failed to create temp cache file: %v", err)
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
-		return
-	}
-	tmpPath := tmpFile.Name()
-
-	w.WriteHeader(http.StatusOK)
-
-	// Stream to the client while teeing to disk. Only media chunks are paced and
-	// accounted: they are the traffic that consumes the home upload.
-	copyErr := h.teeStream(r.Context(), w, tmpFile, resp.Body, category == cache.CategoryMedia, fetch, itemID, clientID, clientName)
-	closeErr := tmpFile.Close()
-	if copyErr != nil || closeErr != nil {
-		_ = os.Remove(tmpPath)
 		return
 	}
 
@@ -375,6 +361,87 @@ func (h *ReverseProxyHandler) serveCachedOrFetch(w http.ResponseWriter, r *http.
 		Headers:      savedHeaders,
 		CreatedAt:    time.Now().UTC(),
 	}
+
+	tmpFile, err := h.storage.CreateTempFile()
+	if err != nil {
+		log.Printf("[JellyProxy] Warning: failed to create temp cache file: %v", err)
+		if isMediaRange {
+			h.proxy.ServeHTTP(w, r)
+			return
+		}
+		for k, vals := range resp.Header {
+			for _, v := range vals {
+				w.Header().Add(k, v)
+			}
+		}
+		w.Header().Set("X-JellyProxy-Cache", "MISS")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+	tmpPath := tmpFile.Name()
+
+	if isMediaRange {
+		copyErr := h.teeStream(r.Context(), io.Discard, tmpFile, resp.Body, true, fetch, itemID, clientID, clientName)
+		closeErr := tmpFile.Close()
+		if copyErr != nil || closeErr != nil {
+			_ = os.Remove(tmpPath)
+			http.Error(w, "JellyProxy: Failed to cache upstream media", http.StatusBadGateway)
+			return
+		}
+		if err := h.storage.CommitTempFile(tmpPath, meta); err != nil {
+			log.Printf("[JellyProxy] Warning: failed to commit cache file for %s: %v", r.URL.Path, err)
+			http.Error(w, "JellyProxy: Failed to commit cache file", http.StatusBadGateway)
+			return
+		}
+		file, committedMeta, err := h.storage.Get(keyHash)
+		if err != nil {
+			http.Error(w, "JellyProxy: Failed to read cached media", http.StatusBadGateway)
+			return
+		}
+		defer file.Close()
+
+		for k, vals := range committedMeta.Headers {
+			for _, v := range vals {
+				w.Header().Add(k, v)
+			}
+		}
+		if committedMeta.ContentType != "" && w.Header().Get("Content-Type") == "" {
+			w.Header().Set("Content-Type", committedMeta.ContentType)
+		}
+		if committedMeta.ETag != "" && w.Header().Get("ETag") == "" {
+			w.Header().Set("ETag", committedMeta.ETag)
+		}
+		if committedMeta.LastModified != "" && w.Header().Get("Last-Modified") == "" {
+			w.Header().Set("Last-Modified", committedMeta.LastModified)
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("X-JellyProxy-Cache", "MISS")
+
+		out := &meteredWriter{ResponseWriter: w, onWrite: func(n int) {
+			h.hub.Sent(clientID, clientName, itemID, n, false)
+		}}
+		http.ServeContent(out, r, "media", committedMeta.CreatedAt, file)
+		return
+	}
+
+	for k, vals := range resp.Header {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("X-JellyProxy-Cache", "MISS")
+	w.WriteHeader(http.StatusOK)
+
+	// Stream to the client while teeing to disk. Only media chunks are paced and
+	// accounted: they are the traffic that consumes the home upload.
+	copyErr := h.teeStream(r.Context(), w, tmpFile, resp.Body, category == cache.CategoryMedia, fetch, itemID, clientID, clientName)
+	closeErr := tmpFile.Close()
+	if copyErr != nil || closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+
 	if err := h.storage.CommitTempFile(tmpPath, meta); err != nil {
 		log.Printf("[JellyProxy] Warning: failed to commit cache file for %s: %v", r.URL.Path, err)
 	}
@@ -397,7 +464,7 @@ func (h *ReverseProxyHandler) teeStream(ctx context.Context, client io.Writer, d
 			if _, err := client.Write(buf[:n]); err != nil {
 				return err
 			}
-			if media {
+			if media && client != io.Discard {
 				h.hub.Sent(clientID, clientName, itemID, n, false)
 			}
 			if flusher != nil {

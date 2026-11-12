@@ -1,11 +1,17 @@
 package handlers
 
 import (
+	"bytes"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
+	"github.com/jellyproxy-project/jellyproxy/proxy/internal/abr"
 	"github.com/jellyproxy-project/jellyproxy/proxy/internal/cache"
+	"github.com/jellyproxy-project/jellyproxy/proxy/internal/config"
+	"github.com/jellyproxy-project/jellyproxy/proxy/internal/telemetry"
 )
 
 func TestClassifyCacheableRequest(t *testing.T) {
@@ -129,5 +135,103 @@ func TestBuildCacheKeyMedia(t *testing.T) {
 	// Verify codec and bitrate are preserved
 	if key1 != "media:/videos/item123/hls1/main/5.m4s?maxBitrate=8000000&videoCodec=h264" {
 		t.Errorf("Unexpected normalized media cache key: %q", key1)
+	}
+}
+
+func TestRangeRequestMediaCaching(t *testing.T) {
+	fullPayload := []byte("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	var upstreamHits int32
+	var sawUpstreamRange atomic.Bool
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamHits, 1)
+		if r.Header.Get("Range") != "" {
+			sawUpstreamRange.Store(true)
+		}
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("ETag", `"media-etag-1"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(fullPayload)
+	}))
+	defer upstream.Close()
+
+	storage, err := cache.NewStorageManager(t.TempDir(), 1.0)
+	if err != nil {
+		t.Fatalf("NewStorageManager: %v", err)
+	}
+	h, err := NewReverseProxyHandler(&config.Config{UpstreamURL: upstream.URL}, storage)
+	if err != nil {
+		t.Fatalf("NewReverseProxyHandler: %v", err)
+	}
+	mgr := abr.NewBandwidthManager(abr.Config{Enabled: true, UploadSpeedBps: 100_000_000})
+	hub := telemetry.NewHub(5e9)
+	h.SetABR(mgr)
+	h.SetTelemetry(hub, telemetry.NewItemNames())
+
+	// 1. Cache MISS with Range header: should strip Range upstream, fetch full object, cache it, and serve 206 range
+	req1 := httptest.NewRequest(http.MethodGet, "/videos/item-range-1/hls1/main/init.mp4?DeviceId=dev1", nil)
+	req1.Header.Set("Range", "bytes=10-19")
+	w1 := httptest.NewRecorder()
+	h.ServeHTTP(w1, req1)
+
+	if w1.Code != http.StatusPartialContent {
+		t.Fatalf("MISS range status = %d, want %d (206)", w1.Code, http.StatusPartialContent)
+	}
+	if sawUpstreamRange.Load() {
+		t.Errorf("expected Range header to be stripped on upstream request during cache miss")
+	}
+	if got := w1.Header().Get("X-JellyProxy-Cache"); got != "MISS" {
+		t.Errorf("X-JellyProxy-Cache = %q, want MISS", got)
+	}
+	if got := w1.Body.String(); got != "abcdefghij" {
+		t.Errorf("MISS range body = %q, want %q", got, "abcdefghij")
+	}
+	if got := w1.Header().Get("Content-Range"); got != "bytes 10-19/62" {
+		t.Errorf("MISS Content-Range = %q, want %q", got, "bytes 10-19/62")
+	}
+
+	// Verify full object is stored in cache
+	stats := storage.GetStats()
+	if stats.TotalBytes != int64(len(fullPayload)) {
+		t.Errorf("cached TotalBytes = %d, want %d", stats.TotalBytes, len(fullPayload))
+	}
+
+	// 2. Cache HIT with different Range header: should serve 206 directly from cached full object without hitting upstream
+	req2 := httptest.NewRequest(http.MethodGet, "/videos/item-range-1/hls1/main/init.mp4?DeviceId=dev1", nil)
+	req2.Header.Set("Range", "bytes=0-9")
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusPartialContent {
+		t.Fatalf("HIT range status = %d, want %d (206)", w2.Code, http.StatusPartialContent)
+	}
+	if got := w2.Header().Get("X-JellyProxy-Cache"); got != "HIT" {
+		t.Errorf("X-JellyProxy-Cache = %q, want HIT", got)
+	}
+	if got := w2.Body.String(); got != "0123456789" {
+		t.Errorf("HIT range body = %q, want %q", got, "0123456789")
+	}
+	if hits := atomic.LoadInt32(&upstreamHits); hits != 1 {
+		t.Errorf("upstreamHits = %d, want 1 (second range request should be served from cache)", hits)
+	}
+
+	// 3. Cache HIT without Range header: should serve full 200 OK payload from cache
+	req3 := httptest.NewRequest(http.MethodGet, "/videos/item-range-1/hls1/main/init.mp4?DeviceId=dev1", nil)
+	w3 := httptest.NewRecorder()
+	h.ServeHTTP(w3, req3)
+
+	if w3.Code != http.StatusOK {
+		t.Fatalf("HIT full status = %d, want 200", w3.Code)
+	}
+	if !bytes.Equal(w3.Body.Bytes(), fullPayload) {
+		t.Errorf("HIT full body mismatch: got %d bytes, want %d", w3.Body.Len(), len(fullPayload))
+	}
+	if hits := atomic.LoadInt32(&upstreamHits); hits != 1 {
+		t.Errorf("upstreamHits = %d, want 1", hits)
+	}
+
+	snap := hub.Snapshot(nil)
+	if snap.TotalPulled != int64(len(fullPayload)) || snap.TotalOut != int64(10+10+len(fullPayload)) {
+		t.Errorf("telemetry: pulled=%d (want %d), out=%d (want %d)", snap.TotalPulled, len(fullPayload), snap.TotalOut, 10+10+len(fullPayload))
 	}
 }

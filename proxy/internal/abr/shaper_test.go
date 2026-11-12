@@ -186,7 +186,6 @@ func TestCase11BackgroundYields(t *testing.T) {
 func TestFCFSStarvesLatecomer(t *testing.T) {
 	m := NewBandwidthManager(Config{Enabled: true, UploadSpeedBps: 10 * mb, Policy: PolicyFCFS, MinBitrateBps: 1})
 	m.Negotiate(Request{ClientID: "a", ItemID: "m1", RequestedBps: 10 * mb})
-	time.Sleep(time.Millisecond)
 	m.Negotiate(Request{ClientID: "b", ItemID: "m2", RequestedBps: 5 * mb})
 	if alloc(m, "a") != 10*mb || alloc(m, "b") != 0 {
 		t.Fatalf("got %d / %d", alloc(m, "a"), alloc(m, "b"))

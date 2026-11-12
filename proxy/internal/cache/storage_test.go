@@ -2,8 +2,10 @@ package cache
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -142,4 +144,62 @@ func TestClassifyAndScanReload(t *testing.T) {
 	if removed := sm2.InvalidateByItemID("ABC-DEF", "image"); removed != 1 {
 		t.Fatalf("expected invalidation after scan reload to remove 1 file, got %d", removed)
 	}
+}
+
+func TestStorageManagerConcurrentCommitAndEvict(t *testing.T) {
+	tmpDir := t.TempDir()
+	// Small max storage (~4KB) so concurrent CommitTempFile/Put/EvictLRU/GetStats race on catStats and entries
+	sm, err := NewStorageManager(tmpDir, 4096.0/float64(BytesPerGB))
+	if err != nil {
+		t.Fatalf("NewStorageManager failed: %v", err)
+	}
+
+	const workers = 8
+	const iterations = 25
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		w := w
+		go func() {
+			defer wg.Done()
+			cats := []string{CategoryImages, CategoryStatic, CategoryMedia}
+			payload := bytes.Repeat([]byte("X"), 512)
+			for i := 0; i < iterations; i++ {
+				cat := cats[(w+i)%len(cats)]
+				rawURL := fmt.Sprintf("/%s/item-%d/seg-%d", cat, w, i)
+				key := HashKey(cat + ":" + rawURL)
+				meta := CacheMetadata{
+					Key:         key,
+					URL:         rawURL,
+					Category:    cat,
+					ItemID:      fmt.Sprintf("item-%d", w),
+					ContentType: "application/octet-stream",
+				}
+				if i%2 == 0 {
+					tmpFile, err := sm.CreateTempFile()
+					if err != nil {
+						t.Errorf("CreateTempFile: %v", err)
+						return
+					}
+					tmpPath := tmpFile.Name()
+					_, _ = tmpFile.Write(payload)
+					_ = tmpFile.Close()
+					if err := sm.CommitTempFile(tmpPath, meta); err != nil {
+						t.Errorf("CommitTempFile: %v", err)
+						return
+					}
+				} else {
+					if err := sm.Put(meta, bytes.NewReader(payload)); err != nil {
+						t.Errorf("Put: %v", err)
+						return
+					}
+				}
+				_ = sm.GetStats()
+				if i%5 == 0 {
+					sm.EvictLRU()
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

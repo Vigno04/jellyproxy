@@ -102,6 +102,7 @@ type pipe struct {
 	allocated   int64
 	pull        int64
 	weight      float64
+	seq         uint64
 	lastSeen    time.Time
 	firstSeen   time.Time
 	burstUntil  time.Time
@@ -117,6 +118,7 @@ type BandwidthManager struct {
 	cfg        Config
 	pipes      map[string]*pipe
 	clientPipe map[string]string
+	seq        uint64
 	caps       *Capabilities
 	bg         *Bucket
 	link       *Bucket
@@ -313,11 +315,13 @@ func (m *BandwidthManager) negotiateLocked(req Request) Decision {
 	key := sig.Key()
 	p := m.pipes[key]
 	if p == nil {
+		m.seq++
 		p = &pipe{
 			key:       key,
 			item:      normalizeItem(req.ItemID),
 			codec:     NormalizeCodec(sig.Codec),
 			clients:   make(map[string]bool),
+			seq:       m.seq,
 			firstSeen: now,
 			bucket:    NewBucket(0, 64*1024),
 		}
@@ -390,7 +394,7 @@ func (m *BandwidthManager) pipeForItem(itemID string) *pipe {
 		if p.item != norm {
 			continue
 		}
-		if best == nil || p.lastSeen.After(best.lastSeen) {
+		if best == nil || p.lastSeen.After(best.lastSeen) || (p.lastSeen.Equal(best.lastSeen) && p.seq > best.seq) {
 			best = p
 		}
 	}
@@ -669,7 +673,12 @@ func (m *BandwidthManager) reallocate() {
 	for _, p := range m.pipes {
 		pipes = append(pipes, p)
 	}
-	sort.Slice(pipes, func(i, j int) bool { return pipes[i].firstSeen.Before(pipes[j].firstSeen) })
+	sort.Slice(pipes, func(i, j int) bool {
+		if pipes[i].firstSeen.Equal(pipes[j].firstSeen) {
+			return pipes[i].seq < pipes[j].seq
+		}
+		return pipes[i].firstSeen.Before(pipes[j].firstSeen)
+	})
 
 	if m.cfg.Policy == PolicyFCFS {
 		rest := capacity

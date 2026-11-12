@@ -308,7 +308,11 @@ func (sm *StorageManager) CommitTempFile(tmpPath string, meta CacheMetadata) err
 	if meta.Category == "" {
 		meta.Category = CategoryStatic
 	}
-	if _, ok := sm.catStats[meta.Category]; !ok {
+	// catStats is guarded by sm.mu; read it under the lock to avoid a data race.
+	sm.mu.RLock()
+	_, validCategory := sm.catStats[meta.Category]
+	sm.mu.RUnlock()
+	if !validCategory {
 		return fmt.Errorf("invalid cache category: %s", meta.Category)
 	}
 
