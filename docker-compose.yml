@@ -3,16 +3,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: jellyproxy
-    restart: unless-stopped
-    network_mode: container:gerbil
+    container_name: ${CONTAINER_NAME:-jellyproxy}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    # Deployment-specific: set NETWORK_MODE in .env (e.g. "container:gerbil" to share a
+    # mesh/ingress container network namespace; the default bridge needs no port mapping
+    # when a reverse proxy reaches the container on its own network).
+    network_mode: ${NETWORK_MODE:-bridge}
     environment:
-      - PORT=8096
-      - UPSTREAM_URL=https://198.51.100.10:52905
-      - UPSTREAM_HOST=jellyfin.example.com
-      - SHARED_SECRET=replace-me-shared-secret
-      - CACHE_DIR=/var/cache/jellyproxy
-      - LOG_LEVEL=info
+      - PORT=${PORT:-8096}
+      - UPSTREAM_URL=${UPSTREAM_URL:?set UPSTREAM_URL in .env}
+      - UPSTREAM_HOST=${UPSTREAM_HOST:?set UPSTREAM_HOST in .env}
+      - SHARED_SECRET=${SHARED_SECRET:?set SHARED_SECRET in .env}
+      - CACHE_DIR=${CACHE_DIR:-/var/cache/jellyproxy}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - jellyproxy_cache:/var/cache/jellyproxy
 

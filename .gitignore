@@ -19,6 +19,7 @@ plugin/JellyProxy/obj/
 # Docker & local data
 data/
 /cache/
+.env
 
 # OS
 .DS_Store

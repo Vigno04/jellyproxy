@@ -52,7 +52,7 @@ Run with Docker Compose:
 ```yaml
 services:
   jellyproxy:
-    image: ghcr.io/jellyproxy-project/jellyproxy:latest # or build locally
+    image: jellyproxy:local # build with: docker build -t jellyproxy:local .
     container_name: jellyproxy
     restart: unless-stopped
     ports:
