@@ -11,8 +11,8 @@
         "version": "0.6.0.0",
         "targetAbi": "10.11.6.0",
         "sourceUrl": "https://raw.githubusercontent.com/Vigno04/jellyproxy/refs/heads/main/packages/jellyproxy-0.6.0.zip",
-        "checksum": "062fd9203d7fad57512253a364e943d8",
-        "timestamp": "2026-11-12T12:15:23Z",
+        "checksum": "5f3a084fc50960b1042ddf9feeffddb5",
+        "timestamp": "2026-11-12T12:28:31Z",
         "changelog": "Auto-detect Jellyfin hardware encoders from encoding.xml, sync full ABR shaper config, periodic session/encoder heartbeat, and rich transcode/episode telemetry."
       }
     ]
