@@ -78,7 +78,7 @@ curl http://localhost:8080/jellyproxy/api/status
 1. In your Jellyfin Server Dashboard, navigate to **Dashboard -> Plugins -> Repositories**.
 2. Click **+** (Add Repository) and enter:
    - **Repository Name**: `JellyProxy`
-   - **Repository URL**: `https://raw.githubusercontent.com/jellyproxy-project/jellyproxy/refs/heads/main/manifest.json`
+   - **Repository URL**: `https://raw.githubusercontent.com/Vigno04/jellyproxy/refs/heads/main/manifest.json`
 3. Go to the **Catalog** tab, find **JellyProxy**, and click **Install**.
 4. Restart your Jellyfin Server.
 5. In **Dashboard -> Plugins -> JellyProxy**, enter your **Proxy Edge URL** and **Shared Secret**, then click **Test Connection & Pair**.
